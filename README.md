@@ -1,4 +1,4 @@
-# fuckpumpfunbots
+# pumpfunbots-reverse
 
 **Open-source toolkit for analyzing and trading pump.fun memecoins on Solana.**
 

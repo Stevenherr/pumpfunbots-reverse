@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How I Reverse-Engineered pump.fun V3 API and Built 7 Trading Bots</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: 'Inter', -apple-system, sans-serif;
+    font-size: 18px;
+    line-height: 1.7;
+    padding: 0;
+  }
+
+  .hero {
+    background: linear-gradient(180deg, #0a1628 0%, #0d1117 100%);
+    border-bottom: 1px solid #1a2332;
+    padding: 80px 20px 60px;
+    text-align: center;
+  }
+
+  .hero h1 {
+    font-size: 42px;
+    font-weight: 900;
+    line-height: 1.2;
+    max-width: 800px;
+    margin: 0 auto 24px;
+    background: linear-gradient(135deg, #00ff88 0%, #00d4ff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .hero .subtitle {
+    font-size: 20px;
+    color: #8b949e;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+
+  .container {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 40px 20px 80px;
+  }
+
+  h2 {
+    font-size: 32px;
+    font-weight: 800;
+    color: #00ff88;
+    margin: 60px 0 24px;
+    padding-top: 20px;
+    border-top: 1px solid #1a2332;
+  }
+
+  h3 {
+    font-size: 24px;
+    font-weight: 700;
+    color: #58a6ff;
+    margin: 40px 0 16px;
+  }
+
+  h4 {
+    font-size: 20px;
+    font-weight: 700;
+    color: #e6edf3;
+    margin: 30px 0 12px;
+  }
+
+  p {
+    margin: 0 0 16px;
+    color: #c9d1d9;
+  }
+
+  strong, b {
+    color: #e6edf3;
+    font-weight: 700;
+  }
+
+  .highlight {
+    color: #00ff88;
+    font-weight: 700;
+  }
+
+  .red { color: #f85149; }
+  .blue { color: #58a6ff; }
+
+  a {
+    color: #58a6ff;
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.2s;
+  }
+  a:hover { border-bottom-color: #58a6ff; }
+
+  hr {
+    border: none;
+    border-top: 1px solid #1a2332;
+    margin: 40px 0;
+  }
+
+  pre {
+    background: #161b22;
+    border: 1px solid #1a2332;
+    border-radius: 8px;
+    padding: 20px;
+    overflow-x: auto;
+    margin: 16px 0 24px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #c9d1d9;
+  }
+
+  code {
+    font-family: 'JetBrains Mono', monospace;
+    background: #161b22;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 15px;
+    color: #00ff88;
+  }
+
+  pre code {
+    background: none;
+    padding: 0;
+    color: inherit;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+    font-size: 15px;
+  }
+
+  th {
+    background: #161b22;
+    color: #00ff88;
+    font-weight: 700;
+    text-align: left;
+    padding: 12px 16px;
+    border: 1px solid #1a2332;
+  }
+
+  td {
+    padding: 10px 16px;
+    border: 1px solid #1a2332;
+    color: #c9d1d9;
+  }
+
+  tr:nth-child(even) td { background: #0d1117; }
+  tr:nth-child(odd) td { background: #161b22; }
+
+  ul, ol {
+    margin: 0 0 16px;
+    padding-left: 24px;
+  }
+
+  li {
+    margin: 6px 0;
+    color: #c9d1d9;
+  }
+
+  .callout {
+    background: #161b22;
+    border-left: 4px solid #00ff88;
+    padding: 20px 24px;
+    margin: 24px 0;
+    border-radius: 0 8px 8px 0;
+  }
+
+  .callout-red {
+    border-left-color: #f85149;
+  }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin: 24px 0;
+  }
+
+  .stat-card {
+    background: #161b22;
+    border: 1px solid #1a2332;
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+  }
+
+  .stat-card .value {
+    font-size: 28px;
+    font-weight: 900;
+    color: #00ff88;
+    display: block;
+  }
+
+  .stat-card .label {
+    font-size: 13px;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 4px;
+  }
+
+  .image-placeholder {
+    background: #161b22;
+    border: 2px dashed #1a2332;
+    border-radius: 8px;
+    padding: 40px;
+    text-align: center;
+    margin: 24px 0;
+    color: #8b949e;
+    font-size: 14px;
+  }
+
+  .image-placeholder img {
+    max-width: 100%;
+    border-radius: 8px;
+  }
+
+  .bot-card {
+    background: #161b22;
+    border: 1px solid #1a2332;
+    border-radius: 12px;
+    padding: 24px;
+    margin: 20px 0;
+  }
+
+  .bot-card h4 {
+    margin-top: 0;
+    color: #00ff88;
+  }
+
+  .tag {
+    display: inline-block;
+    background: #00ff8820;
+    color: #00ff88;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    margin-right: 6px;
+  }
+
+  .tag-blue {
+    background: #58a6ff20;
+    color: #58a6ff;
+  }
+
+  .architecture {
+    background: #161b22;
+    border: 1px solid #1a2332;
+    border-radius: 12px;
+    padding: 30px;
+    margin: 24px 0;
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #00ff88;
+  }
+
+  .footer {
+    text-align: center;
+    padding: 40px 20px;
+    border-top: 1px solid #1a2332;
+    color: #8b949e;
+    font-size: 14px;
+  }
+
+  .footer a { color: #00ff88; }
+
+  .can-cannot {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 24px 0;
+  }
+
+  @media (max-width: 600px) {
+    .can-cannot { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 28px; }
+  }
+
+  .can-box, .cannot-box {
+    background: #161b22;
+    border-radius: 8px;
+    padding: 20px;
+    border: 1px solid #1a2332;
+  }
+
+  .can-box { border-top: 3px solid #00ff88; }
+  .cannot-box { border-top: 3px solid #f85149; }
+
+  .can-box h4 { color: #00ff88; margin-top: 0; }
+  .cannot-box h4 { color: #f85149; margin-top: 0; }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>How I Reverse-Engineered pump.fun's V3 API and Built 7 Trading Bots That Actually Work</h1>
+  <p class="subtitle">666 wallets analyzed. 7 strategies classified. A secret API migration decoded. Full open-source toolkit.</p>
+</div>
+
+<div class="container">
+
+<p>Every day, thousands of tokens launch on pump.fun. Most die in minutes. But a small group of wallets consistently extracts profit from the chaos.</p>
+
+<p>I wanted to understand HOW.</p>
+
+<p>Not from Twitter threads. Not from paid groups. From the blockchain itself.</p>
+
+<p>So I pulled every transaction, decoded every instruction, and mapped every strategy these wallets use.</p>
+
+<p>What I found was a complete ecosystem of automated trading - and a platform migration that broke every existing bot overnight.</p>
+
+<hr>
+
+<h2>What I Built</h2>
+
+<div class="architecture">
+<pre style="background:none;border:none;color:#00ff88;text-align:center;margin:0;padding:0;">
+                        YOU
+                         |
+                   lib/ (7 modules)
+                         |
+    +--------+--------+--+--+--------+--------+--------+
+    |        |        |     |        |        |        |
+ BASIC    MONITOR  SNIPER  COPY   ANALYTICS VOLUME  GRADUATION
+ TRADER           BOT    TRADER  DASHBOARD ANALYZER  SNIPER
+    |        |        |     |        |        |        |
+    +--------+--------+--+--+--------+--------+--------+
+                         |
+              pump.fun V3 + PumpSwap AMM
+</pre>
+</div>
+
+<p>Seven bots. One shared library. Zero dependencies on paid APIs or indicators.</p>
+<p>Each bot has one job. Each strategy is backed by on-chain data. Nothing is guesswork.</p>
+
+<hr>
+
+<h2>Part 1: The Research - 666 Wallets, 7 Strategies</h2>
+
+<p>Before writing a single line of bot code, I spent weeks doing on-chain research.</p>
+
+<p>I started with 5 wallets known to be active on pump.fun. From their transactions, I extracted every counterparty, every program they interacted with, every timing pattern.</p>
+
+<p>That expanded to <span class="highlight">666 unique wallets</span> across <span class="highlight">7 distinct strategy types</span>.</p>
+
+<h3>The 7 Strategy Types</h3>
+
+<div class="image-placeholder">
+  [IMAGE: Strategy classification chart with win rates]
+</div>
+
+<div class="bot-card">
+  <h4>1. Direct High-Frequency Traders <span class="tag">89 wallets</span> <span class="tag">80% win rate</span></h4>
+  <p>These are the pros. No custom programs. No complex setups. Just raw speed with standard instructions and CU priority = 0.</p>
+  <p>They don't need fancy infrastructure because their EDGE is selection, not speed. They pick the right tokens.</p>
+</div>
+
+<div class="bot-card">
+  <h4>2. Sell-Only Wallets <span class="tag">112 wallets</span> <span class="tag">62% win rate</span></h4>
+  <p>These wallets NEVER buy on pump.fun. They only sell.</p>
+  <p>How? They receive tokens through bundled transactions, airdrops, or coordinated multi-wallet operations. The buy happens through a different wallet. The sell is the exit.</p>
+  <p>This is the signature of coordinated launch-and-dump operations.</p>
+</div>
+
+<div class="bot-card">
+  <h4>3. Slot-0 Snipers <span class="tag">67 wallets</span> <span class="tag">10-45% win rate</span></h4>
+  <p>These buy in the SAME SLOT as the token creation. Literally the first possible moment.</p>
+  <p>Win rate varies wildly based on filters. Blind sniping = 10%. With dev-buy filters and bonding curve checks = 45%.</p>
+</div>
+
+<div class="bot-card">
+  <h4>4. Custom Bot Programs <span class="tag">203 wallets</span> <span class="tag">35% win rate</span></h4>
+  <p>The largest group. Each deploys their own on-chain program that calls pump.fun via CPI (Cross-Program Invocation).</p>
+  <p>I extracted and analyzed 12 unique bot programs from the chain. Common patterns: bundled create+buy, custom slippage logic, multi-account management.</p>
+</div>
+
+<div class="bot-card">
+  <h4>5. Multi-Program Operators <span class="tag">45 wallets</span> <span class="tag">40% win rate</span></h4>
+  <p>These use multiple programs in a single transaction. Typically: pump.fun buy + Jito tip + custom routing logic.</p>
+  <p>More sophisticated than single-program bots but harder to maintain.</p>
+</div>
+
+<div class="bot-card">
+  <h4>6. Brute Force <span class="tag">98 wallets</span> <span class="tag">25% win rate</span></h4>
+  <p>High volume, low selectivity. These wallets buy everything and rely on the winners paying for the losers.</p>
+  <p>At 25% win rate, they need 4x+ on winners to break even. Some achieve this. Most don't.</p>
+</div>
+
+<div class="bot-card">
+  <h4>7. Buy-Only Wallets <span class="tag">52 wallets</span> <span class="tag">15% win rate</span></h4>
+  <p>These buy and never sell on pump.fun. Either they sell on PumpSwap AMM after graduation, or they're testing honeypots, or the tokens just die.</p>
+</div>
+
+<h3>The Proof: Real Wallet Performance</h3>
+
+<div class="image-placeholder">
+  <img src="../screenshots/gmgn-kopatych.png" alt="GMGN heatmap showing @kopatych42069 performance">
+  <br><br>
+  [INSERT GMGN SCREENSHOT HERE - @kopatych42069 heatmap]
+</div>
+
+<p>Here's a real wallet running a Direct High-Frequency strategy on GMGN:</p>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <span class="value">+$4.09M</span>
+    <span class="label">Total PnL</span>
+  </div>
+  <div class="stat-card">
+    <span class="value">2,039,161</span>
+    <span class="label">Total Transactions</span>
+  </div>
+  <div class="stat-card">
+    <span class="value">35%</span>
+    <span class="label">Win Rate</span>
+  </div>
+  <div class="stat-card">
+    <span class="value">+$2.11</span>
+    <span class="label">Avg Profit/Trade</span>
+  </div>
+</div>
+
+<p><b>Wallet: @kopatych42069</b></p>
+<p>Look at that heatmap. Every single hour is green. This is not luck. This is a system.</p>
+<p>The average profit per trade is just $2.11. But at 5,255+ trades, that compounds to +$16.1K in the tracked period alone.</p>
+<p>Best hour: <span class="highlight">Tuesday 1 AM - +$28.7K</span></p>
+<p>This is exactly the pattern our research identified: high frequency, small edges, relentless execution.</p>
+
+<h3>Landing Providers: The Hidden Infrastructure</h3>
+
+<p>Speed matters on Solana. Your transaction needs to land FAST.</p>
+<p>We identified 10+ landing providers from tip transfer patterns:</p>
+
+<table>
+  <tr><th>Provider</th><th>Tip Addresses</th><th>Market Share</th></tr>
+  <tr><td><b>Jito</b></td><td>8 accounts</td><td>Dominant - MEV bundles</td></tr>
+  <tr><td><b>Astralane</b></td><td>11 addresses (astr* prefix)</td><td>Growing fast</td></tr>
+  <tr><td><b>Nozomi</b></td><td>18 addresses (noz* prefix)</td><td>Speed-focused</td></tr>
+  <tr><td><b>MoonLander</b></td><td>8 addresses (moon* prefix)</td><td>Mid-tier</td></tr>
+  <tr><td><b>GMGN.ai</b></td><td>9 addresses (gmgn* prefix)</td><td>Consumer bots</td></tr>
+</table>
+
+<p>Our bots use Jito tips with random account selection from the pool.</p>
+
+<hr>
+
+<h2>Part 2: The V3 Discovery - pump.fun Changed Everything</h2>
+
+<p>This is the part nobody else has published.</p>
+
+<p>While building the bots, I connected to pump.fun's live WebSocket stream and... nothing parsed. Zero events matched. 200 transactions processed, 0 decoded.</p>
+
+<div class="callout callout-red">
+  <p><b>pump.fun had silently migrated to V3.</b></p>
+  <p>Every existing bot that used the old prefixes? Dead.</p>
+</div>
+
+<h3>What Changed</h3>
+
+<table>
+  <tr><th></th><th>V2 (old)</th><th>V3 (current)</th></tr>
+  <tr><td>Trade event discriminator</td><td><code>e445a52e51cb9a1d</code></td><td><code>bddb7fd34ee661ee</code></td></tr>
+  <tr><td>Event size</td><td>113 bytes</td><td>390-391 bytes</td></tr>
+  <tr><td>Buy/sell flag</td><td><code>is_buy</code> byte at offset 56</td><td><span class="red">Gone.</span> Read instruction name from logs</td></tr>
+  <tr><td>Create event</td><td>Separate <code>CreateV2</code> event</td><td><code>BondingCurveV3</code> instruction</td></tr>
+  <tr><td>User pubkey</td><td>Offset 57</td><td>Offset 57 (confirmed via tx cross-reference)</td></tr>
+  <tr><td>Reserves</td><td>Not in event</td><td>Virtual SOL/token reserves at offset 97-113</td></tr>
+  <tr><td>New features</td><td>-</td><td>Cashback, holder fees, volume tracking</td></tr>
+</table>
+
+<h3>How I Decoded It</h3>
+
+<ol>
+  <li>Subscribed to pump.fun logs via WebSocket</li>
+  <li>Collected 500 events, cataloged every instruction name and event prefix</li>
+  <li>Found the new discriminator <code>bddb7fd34ee661ee</code> appearing 331 times out of 500</li>
+  <li>Mapped field positions by comparing event data against getTransaction results</li>
+  <li>Cross-referenced user pubkey offset against transaction signers</li>
+</ol>
+
+<div class="callout">
+  <p><b>Critical finding:</b> buy vs sell is no longer encoded in the event data. You have to parse the instruction name from the transaction logs.</p>
+</div>
+
+<pre><code>Instruction: Buy              -> it's a buy
+Instruction: BuyV3             -> it's a buy
+Instruction: BuyExactQuoteInV3 -> it's a buy
+Instruction: Sell              -> it's a sell
+Instruction: SellV2            -> it's a sell
+Instruction: BondingCurveV3    -> NEW TOKEN CREATED</code></pre>
+
+<h3>New V3 Mechanics</h3>
+
+<p><b>Cashback System:</b> pump.fun now rewards volume. <code>InitUserVolumeAccumulator</code> -> trade -> <code>CloseUserVolumeAccumulator</code> -> <code>ClaimCashback</code>. High-frequency bots can earn rewards on top of trading profits.</p>
+
+<p><b>Holder Fee Distribution:</b> <code>DistributeFeeToHolders</code> fires on ~5% of trades, sending 86-164 lamports to 8 token holders. Tiny amounts, but it's a new on-chain signal.</p>
+
+<p><b>Creator Fees:</b> <code>DistributeCreatorFees</code> and <code>CollectCreatorFee</code> exist but fire rarely. Manual collection by token creators.</p>
+
+<h3>PumpSwap AMM: The Afterlife</h3>
+
+<p>When a bonding curve fills (~85 SOL virtual reserves), the token "graduates" to PumpSwap AMM.</p>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <span class="value">318/sec</span>
+    <span class="label">PumpSwap Events</span>
+  </div>
+  <div class="stat-card">
+    <span class="value">1.8x</span>
+    <span class="label">Busier Than Bonding Curve</span>
+  </div>
+  <div class="stat-card">
+    <span class="value">~660K SOL/min</span>
+    <span class="label">Volume</span>
+  </div>
+  <div class="stat-card">
+    <span class="value">43%</span>
+    <span class="label">Bot Micro-Trades</span>
+  </div>
+</div>
+
+<hr>
+
+<h2>Part 3: The Bots - From Simple to Advanced</h2>
+
+<div class="bot-card">
+  <h4>Level 1: Basic Trader <span class="tag-blue tag">CLI</span></h4>
+  <p>The simplest possible interaction with pump.fun.</p>
+<pre><code># Check price
+node bots/basic-trader/trade.mjs price &lt;mint&gt;
+
+# Buy 0.1 SOL worth
+node bots/basic-trader/trade.mjs buy &lt;mint&gt; 0.1
+
+# Sell everything
+node bots/basic-trader/trade.mjs sell &lt;mint&gt; all
+
+# Check your wallet
+node bots/basic-trader/trade.mjs wallet</code></pre>
+  <p>This is the foundation. Every other bot builds on the same <code>lib/pumpfun.mjs</code> primitives: <code>buyIx()</code>, <code>sellIx()</code>, <code>getBondingCurveState()</code>, <code>calcBuyTokens()</code>, <code>calcSellSol()</code>.</p>
+</div>
+
+<div class="bot-card">
+  <h4>Level 2: Token Monitor <span class="tag-blue tag">WebSocket</span></h4>
+  <p>Real-time stream of everything happening on pump.fun.</p>
+<pre><code>node bots/monitor/stream.mjs
+# Or filter for tokens where dev bought at least 0.5 SOL:
+node bots/monitor/stream.mjs --filter-dev-buy 0.5</code></pre>
+  <p>In 30 seconds of monitoring: <span class="highlight">195 creates, 416 buys, 343 sells.</span> That's the pace of pump.fun.</p>
+</div>
+
+<div class="bot-card">
+  <h4>Level 3: Sniper Bot <span class="tag">Auto-Trade</span></h4>
+  <p>The sniper watches for <code>BondingCurveV3</code> (new token creation), checks the dev buy amount, and auto-buys if it passes filters. Then it polls the price and exits on take-profit, stop-loss, or timeout.</p>
+<pre><code># Dry run - no real trades, tracks virtual positions
+SNIPER_MIN_DEV_BUY=0.5 \
+SNIPER_TAKE_PROFIT=1.5 \
+SNIPER_STOP_LOSS=0.7 \
+SNIPER_TIMEOUT_SEC=30 \
+node bots/sniper/sniper.mjs --dry-run</code></pre>
+
+  <p>Real dry-run results from 45 seconds:</p>
+
+<pre><code>[12:18:22] SNIPING: DYdfB51GxXj1SydBJm8uJbndgPBTs8dYwZEg6yF6pump
+  buying 0.1 SOL -> ~7,235,110 tokens
+  entry price: 0.000013566412 SOL/tok
+  [DRY RUN] would buy - position tracked
+
+[12:18:25] selling DYdfB51G... (take-profit 1.9x)
+  [DRY RUN] would sell: +88.2%, held 3s
+  session: 1 trades, 1W/0L</code></pre>
+
+  <div class="callout">
+    <p><span class="highlight">+88.2% in 3 seconds.</span> Take-profit hit at 1.9x.</p>
+    <p>Final score after 45 seconds: 3 trades, 2W/1L (66% win rate in dry-run).</p>
+  </div>
+
+  <p>Config:</p>
+  <ul>
+    <li><code>SNIPER_BUY_SOL</code> - how much to spend per snipe</li>
+    <li><code>SNIPER_TAKE_PROFIT</code> - sell at Nx (e.g., 2.0 = sell at 2x)</li>
+    <li><code>SNIPER_STOP_LOSS</code> - cut loss at Nx (e.g., 0.5 = -50%)</li>
+    <li><code>SNIPER_TIMEOUT_SEC</code> - force exit after N seconds</li>
+    <li><code>SNIPER_MIN_DEV_BUY</code> - skip tokens where dev bought less than this</li>
+    <li><code>SNIPER_MAX_POSITIONS</code> - max concurrent positions</li>
+    <li><code>SNIPER_COOLDOWN_SEC</code> - pause between buys</li>
+  </ul>
+</div>
+
+<div class="bot-card">
+  <h4>Level 4: Copy Trader <span class="tag">Mirror Trades</span></h4>
+  <p>Our research showed Direct High-Frequency traders have an 80% win rate. The copy trader watches their wallets and mirrors every buy and sell.</p>
+<pre><code>COPY_TARGETS=wallet1_address,wallet2_address \
+COPY_BUY_SOL=0.05 \
+node bots/copy-trader/watcher.mjs --dry-run</code></pre>
+  <p>How it works:</p>
+  <ol>
+    <li>Subscribes to pump.fun WebSocket</li>
+    <li>Parses V3 trade events from every transaction</li>
+    <li>Checks if the user matches a target wallet</li>
+    <li>If target buys -> bot buys the same token</li>
+    <li>If target sells -> bot sells its position</li>
+  </ol>
+  <p>Latency between target trade and copy trade: 1-2 seconds.</p>
+</div>
+
+<div class="bot-card">
+  <h4>Level 5: Analytics Dashboard <span class="tag-blue tag">Web UI</span></h4>
+  <p>A live dashboard that shows you the pulse of pump.fun.</p>
+<pre><code>node bots/analytics/server.mjs
+# Open http://localhost:3000</code></pre>
+  <p>Metrics: new tokens/min, trading volume (SOL), buy/sell ratio, top 20 buyers, top 20 tokens, recent token feed.</p>
+  <p>Dark theme. Monospace font. Auto-refreshing. No frameworks.</p>
+</div>
+
+<div class="bot-card">
+  <h4>Level 6: Volume Analyzer <span class="tag-blue tag">Intel</span></h4>
+  <p>CLI tool to X-ray any wallet or token.</p>
+<pre><code># Analyze a wallet
+node bots/volume-analyzer/analyzer.mjs wallet &lt;address&gt;
+
+# Analyze a token
+node bots/volume-analyzer/analyzer.mjs token &lt;mint&gt;</code></pre>
+  <p>Detects: strategy classification, bundled transactions, sell-only patterns, rapid buy-sell cycles, multi-program usage, landing provider identification.</p>
+</div>
+
+<div class="bot-card">
+  <h4>Level 7: Graduation Sniper <span class="tag">Advanced</span></h4>
+  <p>Catches tokens right before they migrate to PumpSwap AMM.</p>
+  <p>When a bonding curve approaches ~85 SOL in virtual reserves (92%+ fill), the token is about to "graduate." This creates a price dislocation.</p>
+<pre><code>node bots/graduation-sniper/graduation.mjs --dry-run</code></pre>
+  <p>The bot reads bonding curve reserves directly from V3 event data (no extra RPC calls) and tracks tokens approaching the threshold.</p>
+</div>
+
+<hr>
+
+<h2>Part 4: The Tech Stack</h2>
+
+<h3>Zero Dependencies Philosophy</h3>
+<p>The entire project runs on 3 npm packages:</p>
+<ul>
+  <li><code>@solana/web3.js</code> - transaction building</li>
+  <li><code>@solana/spl-token</code> - token account handling</li>
+  <li><code>bs58</code> - base58 encoding</li>
+</ul>
+<p>No frameworks. No ORMs. No build tools. Just Node.js ESM modules.</p>
+
+<h3>V3 Event Layout</h3>
+
+<pre><code>Offset   Size   Field
+0        8      Discriminator (bddb7fd34ee661ee)
+8        32     Mint (Pubkey)
+40       8      SOL amount (u64, lamports)
+48       8      Token amount (u64)
+57       32     User (Pubkey)
+97       8      Virtual SOL reserves (u64)
+105      8      Virtual token reserves (u64)
+113+     278    Extended data (fee info, holder data)</code></pre>
+
+<h3>Bonding Curve Math</h3>
+
+<pre><code>price = virtualSolReserves / virtualTokenReserves
+
+// Buy
+tokensOut = (solIn * virtualTokenReserves) / (virtualSolReserves + solIn)
+
+// Sell
+solOut = (tokensIn * virtualSolReserves) / (virtualTokenReserves + tokensIn)</code></pre>
+
+<p>All calculations use BigInt to avoid floating-point errors.</p>
+
+<hr>
+
+<h2>Part 5: Running It Yourself</h2>
+
+<pre><code>git clone https://github.com/zostaff/pumpfunbots-reverse.git
+cd pumpfunbots-reverse
+npm install
+cp .env.example .env
+# Edit .env with your Helius API key
+
+# Generate a wallet
+node -e "import('./lib/wallet.mjs').then(m =&gt; m.generateKeypair())"
+
+# Monitor
+node bots/monitor/stream.mjs
+
+# Sniper dry-run
+node bots/sniper/sniper.mjs --dry-run
+
+# Dashboard
+node bots/analytics/server.mjs</code></pre>
+
+<hr>
+
+<h2>What This CAN and CANNOT Do</h2>
+
+<div class="can-cannot">
+  <div class="can-box">
+    <h4>CAN</h4>
+    <ul>
+      <li>Monitor pump.fun 24/7 with zero human input</li>
+      <li>Detect new tokens within 1-2 seconds of creation</li>
+      <li>Auto-buy and auto-sell based on configurable rules</li>
+      <li>Copy any wallet's trades in real-time</li>
+      <li>Classify wallet strategies from on-chain data</li>
+      <li>Parse the new V3 API that broke every other bot</li>
+      <li>Run dry-run simulations on live data</li>
+      <li>Show live analytics in a browser dashboard</li>
+    </ul>
+  </div>
+  <div class="cannot-box">
+    <h4>CANNOT</h4>
+    <ul>
+      <li>Guarantee profit (no system can)</li>
+      <li>Trade at slot-0 speed (WebSocket, not validator-level)</li>
+      <li>Predict which tokens will pump (we react, not predict)</li>
+      <li>Beat MEV bots in a race (Jito helps, but we're not a searcher)</li>
+      <li>Work without Helius RPC</li>
+      <li>Replace your own risk management</li>
+    </ul>
+  </div>
+</div>
+
+<p>That second list is not hedging. It's the reason the first list is credible.</p>
+
+<hr>
+
+<h2>What's Next</h2>
+
+<ol>
+  <li><b>PumpSwap AMM Trader</b> - trade graduated tokens on the AMM</li>
+  <li><b>Jito Bundle Backrunner</b> - submit buy bundles immediately after token creation</li>
+  <li><b>Multi-Hop Arbitrage</b> - exploit price gaps between bonding curve and PumpSwap</li>
+  <li><b>Fee Income Strategy</b> - buy high-volume tokens to earn holder fee distributions</li>
+  <li><b>Volume Cashback Farming</b> - use V3 instructions to earn volume-based cashback</li>
+</ol>
+
+<p>The research data and bot infrastructure to build all of these is already in the repo.</p>
+
+<hr>
+
+<h2>The Honest Take</h2>
+
+<p>I work in on-chain security. I've seen what these bots do to regular users.</p>
+
+<p>The wallets we analyzed? Many of them are launch-and-dump operations. The 62% win rate on sell-only wallets isn't skill - it's coordination. The 80% win rate on high-freq traders comes from information asymmetry that retail traders don't have.</p>
+
+<p>This project exists because understanding the game is the first step to not getting played.</p>
+
+<p>Every strategy is documented. Every technique is explained. The code is open source.</p>
+
+<p>Use it to build. Use it to protect. Use it to understand.</p>
+
+<div class="footer">
+  <p>
+    <a href="https://github.com/zostaff/pumpfunbots-reverse">github.com/zostaff/pumpfunbots-reverse</a>
+  </p>
+  <p>Built from raw on-chain data. No paid signals. No black boxes. Just code.</p>
+</div>
+
+</div>
+
+</body>
+</html>

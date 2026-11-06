@@ -474,8 +474,8 @@ Buy vs sell: parse `Instruction: <name>` from transaction logs.
 ### Setup
 
 ```bash
-git clone https://github.com/zostaff/fuckpumpfunbots.git
-cd fuckpumpfunbots
+git clone https://github.com/zostaff/pumpfunbots-reverse.git
+cd pumpfunbots-reverse
 npm install
 cp .env.example .env
 # Edit .env with your Helius API key
@@ -569,7 +569,7 @@ Use it to build. Use it to protect. Use it to understand.
 
 ---
 
-**The repo: [github.com/zostaff/fuckpumpfunbots](https://github.com/zostaff/fuckpumpfunbots)**
+**The repo: [github.com/zostaff/pumpfunbots-reverse](https://github.com/zostaff/pumpfunbots-reverse)**
 
 Built from raw on-chain data. No paid signals. No black boxes. Just code.
 
