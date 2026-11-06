@@ -1,23 +1,18 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="pumpfunbots-reverse" width="100%">
+  <img src="docs/covers/1-hero.png" alt="pumpfunbots / reverse: reverse-engineered pump.fun V3" width="100%">
 </p>
 
 <p align="center">
-  <a href="#quick-start"><img src="https://img.shields.io/badge/node-%3E%3D22-00ff88?style=flat-square&logo=node.js&logoColor=white" alt="Node 22+"></a>
-  <a href="#stack"><img src="https://img.shields.io/badge/solana-mainnet-7c3aed?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiPjxjaXJjbGUgY3g9IjEwIiBjeT0iMTAiIHI9IjgiIGZpbGw9IiM3YzNhZWQiLz48L3N2Zz4=&logoColor=white" alt="Solana"></a>
-  <a href="#v3-migration"><img src="https://img.shields.io/badge/pump.fun-V3%20API-00d4ff?style=flat-square" alt="V3 API"></a>
-  <a href="#strategy-research"><img src="https://img.shields.io/badge/wallets-666%20analyzed-f85149?style=flat-square" alt="666 wallets"></a>
-  <a href="#bots"><img src="https://img.shields.io/badge/bots-7%20ready-e3b341?style=flat-square" alt="7 bots"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8b949e?style=flat-square" alt="MIT"></a>
+  <a href="#quick-start"><img src="https://img.shields.io/badge/node-22+-a8ff00?style=flat-square&labelColor=08090b" alt="Node 22+"></a>
+  <a href="#v3-migration"><img src="https://img.shields.io/badge/pump.fun-V3%20decoded-00ff9c?style=flat-square&labelColor=08090b" alt="V3 decoded"></a>
+  <a href="#strategy-research"><img src="https://img.shields.io/badge/wallets-666-a8ff00?style=flat-square&labelColor=08090b" alt="666 wallets"></a>
+  <a href="#bots"><img src="https://img.shields.io/badge/bots-7-ffb800?style=flat-square&labelColor=08090b" alt="7 bots"></a>
+  <a href="#stack"><img src="https://img.shields.io/badge/deps-3-7c8391?style=flat-square&labelColor=08090b" alt="3 deps"></a>
 </p>
 
 <p align="center">
-  <code>on-chain intelligence toolkit for pump.fun</code>
+  <code>pumpfunbots / reverse</code> &nbsp;·&nbsp; on-chain intelligence toolkit for pump.fun &nbsp;·&nbsp; <code>no paid indicators, just code</code>
 </p>
-
----
-
-<img src="docs/bots.svg" alt="Bot Arsenal" width="100%">
 
 ---
 
@@ -47,6 +42,9 @@ node bots/analytics/server.mjs    # open localhost:3000
 ---
 
 ## V3 Migration
+
+<img src="docs/covers/3-v3.png" alt="pump.fun silently migrated to V3" width="100%">
+
 
 > pump.fun silently migrated to V3. Every existing bot using old prefixes is dead. We decoded the new format.
 
@@ -92,6 +90,9 @@ CREATE: BondingCurveV3, BondingCurveJupiter
 
 ## Strategy Research
 
+<img src="docs/covers/2-research.png" alt="666 wallets, 89 win 80% of the time" width="100%">
+
+
 ```
  666 wallets analyzed across 7 strategy types
  ──────────────────────────────────────────────────────────────
@@ -124,6 +125,9 @@ CREATE: BondingCurveV3, BondingCurveJupiter
 
 ## Bots
 
+<img src="docs/covers/6-architecture.png" alt="7 bots, one shared lib, zero paid APIs" width="100%">
+
+
 | | Bot | What it does | Run |
 |-|-----|-------------|-----|
 | `01` | **Basic Trader** | CLI buy/sell/price/balance | `node bots/basic-trader/trade.mjs buy <mint> 0.1` |
@@ -153,6 +157,9 @@ CREATE: BondingCurveV3, BondingCurveJupiter
 
 ## Sniper Results (dry-run)
 
+<img src="docs/covers/4-sniper.png" alt="+88.2% in 3 seconds" width="100%">
+
+
 ```
 [12:18:22] SNIPING: DYdfB51GxXj1SydBJm8uJbndgPBTs8dYwZEg6yF6pump
   buying 0.1 SOL -> ~7,235,110 tokens
@@ -169,6 +176,9 @@ CREATE: BondingCurveV3, BondingCurveJupiter
 ---
 
 ## PumpSwap AMM
+
+<img src="docs/covers/7-pumpswap.png" alt="318 events per second on PumpSwap" width="100%">
+
 
 > When a bonding curve fills (~85 SOL), the token graduates to PumpSwap AMM.
 
@@ -225,8 +235,13 @@ Dependencies    @solana/web3.js  @solana/spl-token  bs58
 | [`docs/wallet-analysis.md`](docs/wallet-analysis.md) | Deep on-chain wallet behavior analysis |
 | [`docs/article.md`](docs/article.md) | Full writeup of the reverse engineering process |
 | [`docs/GUIDE.md`](docs/GUIDE.md) | Complete guide from beginner to advanced |
+| [`docs/covers/`](docs/covers/) | Cover generator: `cover.html?v=1..7`, rendered by `render.sh` |
 
 ---
+
+<p align="center">
+  <a href="https://github.com/zostaff/pumpfunbots-reverse"><img src="docs/covers/5-open-source.png" alt="Open source. 7 bots were inside." width="100%"></a>
+</p>
 
 <p align="center">
   <sub>A research tool, not a promise of returns. Start with <code>--dry-run</code>.</sub>

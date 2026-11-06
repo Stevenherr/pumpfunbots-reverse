@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<!-- pumpfunbots-reverse covers, built on the grokhood.tech site system:
+     a halftone noise field of grey square dots (5px pitch) on #08090b; words and objects are rasterized into the
+     same dot grid (light dots, or neon dots with a blurred glow layer); one neon number in mono with a tube glow;
+     tiny mono uppercase labels in the corners. ?v=1..5 picks the cover. -->
+<html><head><meta charset="utf-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1500px;height:600px;overflow:hidden;background:#08090b;color:#e6e8ec;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+canvas{position:absolute;inset:0;image-rendering:pixelated}
+#glow{filter:blur(10px);opacity:.75;mix-blend-mode:screen}
+.lab{position:absolute;font-size:11px;line-height:16px;letter-spacing:.08em;text-transform:uppercase;color:#7c8391}
+.lab b{color:#e6e8ec;font-weight:500}
+.neon{position:absolute;font-weight:700;letter-spacing:-.02em;line-height:.9;font-variant-numeric:tabular-nums;
+  color:color-mix(in srgb,var(--n) 85%,white);
+  text-shadow:0 0 1px currentColor,0 0 7px color-mix(in srgb,var(--n) 70%,transparent),0 0 20px color-mix(in srgb,var(--n) 45%,transparent),0 0 50px color-mix(in srgb,var(--n) 25%,transparent)}
+.pill{position:absolute;border-radius:999px;padding:9px 18px;font:600 14px/1 -apple-system,"Helvetica Neue",sans-serif;color:#08090b;background:var(--n);
+  box-shadow:0 0 12px color-mix(in srgb,var(--n) 60%,transparent),0 0 40px color-mix(in srgb,var(--n) 25%,transparent)}
+.h{position:absolute;font:600 30px/1.1 -apple-system,"Helvetica Neue",sans-serif;letter-spacing:-.02em}
+.h i{font-style:normal;color:color-mix(in srgb,var(--n) 85%,white)}
+.sub{position:absolute;font:400 15px/1.45 -apple-system,"Helvetica Neue",sans-serif;color:#7c8391}
+</style></head><body>
+<canvas id="c" width="1500" height="600"></canvas>
+<canvas id="glow" width="1500" height="600"></canvas>
+<div id="ui"></div>
+<script>
+const V = +(new URLSearchParams(location.search).get('v') || 1)
+const W = 1500, H = 600, CELL = 5, COLS = W / CELL, ROWS = H / CELL
+const NEON = { 1: '#00ff9c', 2: '#a8ff00', 3: '#a8ff00', 4: '#ffb800', 5: '#a8ff00', 6: '#a8ff00', 7: '#00ff9c' }[V]
+document.body.style.setProperty('--n', NEON)
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16))
+const mix = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * k))
+const BG = [8, 9, 11], LO = [0x1d, 0x20, 0x27], HI = [0x2a, 0x2f, 0x38], FG = [0xe6, 0xe8, 0xec], NE = hex(NEON), RED = [255, 23, 68]
+
+// value noise fbm
+const h2 = (x, y) => { const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return n - Math.floor(n) }
+const sm = t => t * t * (3 - 2 * t)
+const vn = (x, y) => { const xi = Math.floor(x), yi = Math.floor(y), u = sm(x - xi), v = sm(y - yi), a = h2(xi, yi), b = h2(xi + 1, yi), c = h2(xi, yi + 1), d = h2(xi + 1, yi + 1); return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v }
+const fbm = (x, y) => { let f = 0, a = .5; for (let i = 0; i < 4; i++) { f += a * vn(x, y); x *= 2; y *= 2; a *= .5 } return f }
+
+// layers: each cell can carry {kind:'fg'|'neon'|'red'|'hole', a:0..1}
+const L = new Array(COLS * ROWS).fill(null)
+function raster(draw, kind, min = 0.35, alpha = a => a) {
+  const c = document.createElement('canvas'); c.width = W; c.height = H
+  const g = c.getContext('2d', { willReadFrequently: true }); g.fillStyle = '#fff'; g.strokeStyle = '#fff'; draw(g)
+  const px = g.getImageData(0, 0, W, H).data
+  for (let r = 0; r < ROWS; r++) for (let q = 0; q < COLS; q++) {
+    let on = 0
+    for (let y = r * CELL; y < r * CELL + CELL; y++) for (let x = q * CELL; x < q * CELL + CELL; x++) on += px[(y * W + x) * 4 + 3] / 255
+    on /= CELL * CELL
+    if (on >= min) L[r * COLS + q] = { kind, a: alpha(on) }
+  }
+}
+const text = (s, x, y, size, font = '700 ' + size + 'px ui-monospace, "SF Mono", Menlo, monospace', ls = -0.02) => g => {
+  g.font = font; g.textBaseline = 'alphabetic'; g.letterSpacing = (ls * size) + 'px'; g.fillText(s, x, y)
+}
+
+function paint() {
+  const c = document.getElementById('c').getContext('2d'), gl = document.getElementById('glow').getContext('2d')
+  c.fillStyle = `rgb(${BG})`; c.fillRect(0, 0, W, H)
+  for (let r = 0; r < ROWS; r++) for (let q = 0; q < COLS; q++) {
+    const x = q * CELL, y = r * CELL, l = L[r * COLS + q]
+    if (l && l.kind === 'hole') continue
+    if (l) {
+      const col = l.kind === 'fg' ? mix(BG, FG, l.a) : l.kind === 'dim' ? mix(BG, FG, l.a * 0.45) : l.kind === 'red' ? mix(RED, [255, 255, 255], .15) : mix(NE, [255, 255, 255], .15)
+      c.fillStyle = `rgb(${col})`; c.fillRect(x, y, CELL - 1, CELL - 1)
+      if (l.kind === 'neon' || l.kind === 'red') { gl.fillStyle = l.kind === 'red' ? `rgb(${RED})` : NEON; gl.fillRect(x - 1, y - 1, CELL + 1, CELL + 1) }
+      continue
+    }
+    let n = fbm(q * 0.035 + V * 7.3, r * 0.05 - V * 3.1); n = Math.max(0, (n - 0.38) * 2.4)
+    const sz = Math.min(CELL - 2, Math.round(n * (CELL - 1)))
+    if (sz > 0) { c.fillStyle = `rgb(${mix(LO, HI, Math.min(1, n))})`; c.fillRect(x, y, sz, sz) }
+  }
+}
+const ui = document.getElementById('ui')
+const add = html => ui.insertAdjacentHTML('beforeend', html)
+const corners = (tl, tr, bl, br) => {
+  add(`<div class="lab" style="left:28px;top:22px">${tl}</div><div class="lab" style="right:28px;top:22px;text-align:right">${tr}</div>`)
+  add(`<div class="lab" style="left:28px;bottom:22px">${bl}</div><div class="lab" style="right:28px;bottom:22px;text-align:right">${br}</div>`)
+}
+// the mascot of this repo: a capsule split in two, drawn as a shape mask
+function capsule(g, cx, cy, len, r, ang, gap, half) {
+  for (const sd of [-1, 1]) {
+    if (half && half !== sd) continue
+    g.save(); g.translate(cx, cy); g.rotate(ang); g.translate(sd * gap / 2, 0)
+    g.beginPath(); g.rect(sd < 0 ? -len : 0, -r - 2, len, 2 * r + 4); g.clip()
+    g.beginPath(); g.roundRect(-len / 2, -r, len, 2 * r, r); g.fill(); g.restore()
+  }
+}
+
+if (V === 1) {           // the preloader composition: dot capsule + dot wordmark + one neon number
+  raster(g => capsule(g, 145, 325, 230, 54, -0.75, 28, -1), 'neon', 0.4)
+  raster(g => capsule(g, 145, 325, 230, 54, -0.75, 28, 1), 'fg', 0.4)
+  raster(text('PUMPFUNBOTS', 280, 380, 150), 'fg', 0.35)
+  add(`<div class="neon" style="right:60px;top:140px;font-size:96px">V3</div>`)
+  add(`<div class="lab" style="right:62px;top:236px;text-align:right">decoded · bddb7fd34ee661ee</div>`)
+  add(`<div class="h" style="left:282px;top:418px">Reverse-engineered <i>pump.fun</i>.</div>`)
+  add(`<div class="sub" style="left:282px;top:462px">666 wallets · 7 strategies · 7 open-source bots</div>`)
+  corners('pumpfunbots <b>/ reverse</b>', 'solana mainnet · pump.fun v3', 'github.com/zostaff/pumpfunbots-reverse', 'no paid indicators · just code')
+}
+if (V === 2) {           // one neon number + a waffle of 666 wallets, 89 of them lit
+  add(`<div class="neon" style="left:60px;top:130px;font-size:200px">666</div>`)
+  add(`<div class="h" style="left:66px;top:330px">wallets reverse-engineered.<br>Only <i>89</i> of them win 80% of the time.</div>`)
+  add(`<div class="sub" style="left:66px;top:420px">7 strategy types · from 5 seed wallets to every counterparty on-chain</div>`)
+  const x0 = 830, y0 = 110, step = 15, per = 37
+  const lit = new Set(); let s = 7; while (lit.size < 89) { s = (s * 16807) % 2147483647; lit.add(s % 666) }
+  raster(g => { for (let i = 0; i < 666; i++) if (!lit.has(i)) g.fillRect(x0 + (i % per) * step, y0 + Math.floor(i / per) * step, 10, 10) }, 'dim', 0.3)
+  raster(g => { for (const i of lit) g.fillRect(x0 + (i % per) * step, y0 + Math.floor(i / per) * step, 10, 10) }, 'neon', 0.3)
+  add(`<div class="lab" style="left:830px;top:390px">■ <b>direct high-freq · 89</b><br>□ sell-only 112 · custom bot 203 · brute 98 · slot-0 67 · buy-only 52 · multi 45</div>`)
+  corners('pumpfunbots <b>/ reverse</b>', 'research · 666 wallets', 'github.com/zostaff/pumpfunbots-reverse', 'on-chain · no paid groups')
+}
+if (V === 3) {           // the discovery: dot V2 crossed out in red, neon V3
+  raster(text('V2', 80, 440, 330), 'dim', 0.35)
+  raster(g => { g.fillRect(70, 300, 560, 22) }, 'red', 0.3)
+  raster(text('V3', 830, 440, 330), 'neon', 0.35)
+  add(`<div class="lab" style="left:86px;top:470px">e445a52e51cb9a1d · CreateV2 · 113 bytes · <b style="color:#ff5c7a">0 / 200 decoded</b></div>`)
+  add(`<div class="lab" style="left:836px;top:470px">bddb7fd34ee661ee · BondingCurveV3 · 391 bytes · <b>200 / 200</b></div>`)
+  add(`<div class="h" style="left:86px;top:96px">pump.fun silently migrated to V3. <i>We noticed.</i></div>`)
+  corners('pumpfunbots <b>/ reverse</b>', 'incident · silent migration', 'github.com/zostaff/pumpfunbots-reverse', 'every bot broke overnight')
+}
+if (V === 4) {           // the sniper: a dot bonding curve, entry and take-profit, neon +88.2%
+  const f = x => 520 - 380 * Math.pow((x - 60) / 1380, 2.2)
+  raster(g => { g.lineWidth = 6; g.beginPath(); for (let x = 60; x <= 1440; x += 4) g.lineTo(x, f(x)); g.stroke() }, 'dim', 0.25)
+  raster(g => { for (let x = 60; x <= 1440; x += 20) g.fillRect(x, f(x) + 10, 6, 520 - f(x)) }, 'dim', 0.2, a => a * .5)
+  raster(g => { g.lineWidth = 8; g.beginPath(); for (let x = 300; x <= 820; x += 4) g.lineTo(x, f(x)); g.stroke() }, 'neon', 0.25)
+  raster(g => { g.beginPath(); g.arc(300, f(300), 14, 0, 7); g.fill(); g.beginPath(); g.arc(820, f(820), 20, 0, 7); g.fill() }, 'neon', 0.3)
+  add(`<div class="neon" style="left:60px;top:70px;font-size:150px">+88.2%</div>`)
+  add(`<div class="h" style="left:66px;top:220px">in 3 seconds. Slot-0 entry,<br>take-profit at <i>1.9x</i>.</div>`)
+  add(`<div class="lab" style="left:250px;top:${f(300) + 26}px">buy · slot 0 · 0.1 sol</div><div class="lab" style="left:770px;top:${f(820) - 46}px"><b>tp 1.9x · sell all</b></div><div class="lab" style="right:60px;top:${f(1440) + 18}px;text-align:right">graduation → pumpswap</div>`)
+  corners('pumpfunbots <b>/ reverse</b>', 'sniper.mjs · --dry-run', 'github.com/zostaff/pumpfunbots-reverse', '7 bots · open source')
+}
+if (V === 5) {           // the big object: a huge split capsule cut out of the field, the 7 bots spilling out as neon dots
+  raster(g => capsule(g, 1040, 300, 600, 130, -0.42, 150, -1), 'fg', 0.4, a => 0.95)
+  raster(g => capsule(g, 1040, 300, 600, 130, -0.42, 150, 1), 'dim', 0.4, a => 0.9)
+  raster(g => { g.save(); g.translate(1040, 300); g.rotate(-0.42); for (let i = 0; i < 7; i++) { const y = -120 + i * 40, x = Math.sin(i * 1.7) * 14; g.beginPath(); g.arc(x, y, 10, 0, 7); g.fill() } g.restore() }, 'neon', 0.3)
+  raster(text('OPEN', 60, 230, 120), 'fg', 0.35); raster(text('SOURCE.', 60, 350, 120), 'fg', 0.35)
+  add(`<div class="h" style="left:66px;top:392px">We opened the black box of <i>pump.fun</i>.<br>7 bots were inside.</div>`)
+  add(`<div class="pill" style="left:66px;top:486px">github ↗</div>`)
+  const bots = ['basic trader', 'monitor', 'sniper', 'copy trader', 'analytics', 'volume', 'graduation']
+  bots.forEach((b, i) => { const a = -0.42, ly = -120 + i * 40, lx = Math.sin(i * 1.7) * 14 + 26; const X = 1040 + lx * Math.cos(a) - ly * Math.sin(a), Y = 300 + lx * Math.sin(a) + ly * Math.cos(a); add(`<div class="lab" style="left:${X}px;top:${Y - 8}px"><b>${b}</b></div>`) })
+  corners('pumpfunbots <b>/ reverse</b>', '666 wallets · 7 strategies · v3', 'github.com/zostaff/pumpfunbots-reverse', 'no paid indicators · just code')
+}
+if (V === 6) {           // the architecture: 7 neon bots -> one dot block lib/ -> pump.fun v3 + pumpswap
+  const xs = [...Array(7)].map((_, i) => 730 + i * 110), mid = 1060
+  raster(g => {
+    g.lineWidth = 5
+    g.beginPath(); xs.forEach(x => { g.moveTo(x, 172); g.lineTo(x, 225) }); g.moveTo(xs[0], 225); g.lineTo(xs[6], 225)
+    g.moveTo(mid, 225); g.lineTo(mid, 262); g.moveTo(mid, 352); g.lineTo(mid, 390); g.moveTo(870, 390); g.lineTo(1250, 390)
+    g.moveTo(870, 390); g.lineTo(870, 420); g.moveTo(1250, 390); g.lineTo(1250, 420); g.stroke()
+    g.lineWidth = 6; g.beginPath(); g.roundRect(735, 420, 270, 84, 10); g.stroke(); g.beginPath(); g.roundRect(1115, 420, 270, 84, 10); g.stroke()
+  }, 'dim', 0.3)
+  raster(g => { g.lineWidth = 6; g.beginPath(); g.roundRect(880, 262, 360, 90, 12); g.stroke() }, 'dim', 0.3)
+  raster(text('LIB/', 958, 332, 84), 'fg', 0.35)
+  raster(g => xs.forEach(x => { g.beginPath(); g.roundRect(x - 14, 142, 28, 28, 4); g.fill() }), 'neon', 0.3)
+  const bots = ['basic', 'monitor', 'sniper', 'copy', 'analytics', 'volume', 'graduation']
+  bots.forEach((b, i) => add(`<div class="lab" style="left:${xs[i]}px;top:112px;transform:translateX(-50%)"><b>${b}</b></div>`))
+  add(`<div class="lab" style="left:870px;top:446px;transform:translateX(-50%);text-align:center"><b>pump.fun v3</b><br>bonding curve</div>`)
+  add(`<div class="lab" style="left:1250px;top:446px;transform:translateX(-50%);text-align:center"><b>pumpswap amm</b><br>graduated tokens</div>`)
+  add(`<div class="neon" style="left:60px;top:120px;font-size:200px">7</div>`)
+  add(`<div class="h" style="left:66px;top:320px">bots. One shared <i>lib/</i>.<br>Zero paid APIs.</div>`)
+  add(`<div class="sub" style="left:66px;top:410px">config · constants · pumpfun · rpc · tx · wallet · ws</div>`)
+  corners('pumpfunbots <b>/ reverse</b>', 'architecture · node esm', 'github.com/zostaff/pumpfunbots-reverse', '3 npm packages · no frameworks')
+}
+if (V === 7) {           // the afterlife: neon 318, dot bars pumpswap vs curve, a 100-cell waffle with 43 bot trades lit
+  const x0 = 800
+  raster(g => g.fillRect(x0, 150, 636, 50), 'neon', 0.3)
+  raster(g => g.fillRect(x0, 270, 360, 50), 'dim', 0.3)
+  add(`<div class="lab" style="left:${x0}px;top:126px"><b>pumpswap amm · 318 events/sec</b></div>`)
+  add(`<div class="lab" style="left:${x0}px;top:246px">bonding curve · 180 events/sec</div>`)
+  const lit = new Set(); let s = 11; while (lit.size < 43) { s = (s * 16807) % 2147483647; lit.add(s % 100) }
+  raster(g => { for (let i = 0; i < 100; i++) if (!lit.has(i)) g.fillRect(x0 + (i % 25) * 15, 380 + Math.floor(i / 25) * 15, 10, 10) }, 'dim', 0.3)
+  raster(g => { for (const i of lit) g.fillRect(x0 + (i % 25) * 15, 380 + Math.floor(i / 25) * 15, 10, 10) }, 'neon', 0.3)
+  add(`<div class="lab" style="left:${x0}px;top:452px">■ <b>43% of swaps under 0.01 sol</b> · bot micro-trades</div>`)
+  add(`<div class="neon" style="left:60px;top:120px;font-size:200px">318</div>`)
+  add(`<div class="h" style="left:66px;top:320px">events per second on PumpSwap.<br><i>1.8x</i> busier than the curve.</div>`)
+  add(`<div class="sub" style="left:66px;top:410px">~660K SOL per minute · 8.4% whale trades over 10 SOL</div>`)
+  corners('pumpfunbots <b>/ reverse</b>', 'pumpswap amm · after graduation', 'github.com/zostaff/pumpfunbots-reverse', 'graduation at ~85 sol')
+}
+paint()
+</script></body></html>
