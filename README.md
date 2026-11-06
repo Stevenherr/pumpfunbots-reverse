@@ -1,129 +1,237 @@
-# pumpfunbots-reverse
+<p align="center">
+  <img src="docs/banner.svg" alt="pumpfunbots-reverse" width="100%">
+</p>
 
-**Open-source toolkit for analyzing and trading pump.fun memecoins on Solana.**
+<p align="center">
+  <a href="#quick-start"><img src="https://img.shields.io/badge/node-%3E%3D22-00ff88?style=flat-square&logo=node.js&logoColor=white" alt="Node 22+"></a>
+  <a href="#stack"><img src="https://img.shields.io/badge/solana-mainnet-7c3aed?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiPjxjaXJjbGUgY3g9IjEwIiBjeT0iMTAiIHI9IjgiIGZpbGw9IiM3YzNhZWQiLz48L3N2Zz4=&logoColor=white" alt="Solana"></a>
+  <a href="#v3-migration"><img src="https://img.shields.io/badge/pump.fun-V3%20API-00d4ff?style=flat-square" alt="V3 API"></a>
+  <a href="#strategy-research"><img src="https://img.shields.io/badge/wallets-666%20analyzed-f85149?style=flat-square" alt="666 wallets"></a>
+  <a href="#bots"><img src="https://img.shields.io/badge/bots-7%20ready-e3b341?style=flat-square" alt="7 bots"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8b949e?style=flat-square" alt="MIT"></a>
+</p>
 
-Built from on-chain research of 666 wallets, 7 strategy types, and 10+ landing providers. Fully updated for pump.fun V3 API (November 2026).
+<p align="center">
+  <code>on-chain intelligence toolkit for pump.fun</code>
+</p>
 
 ---
 
-## What's Inside
-
-```
-                    YOU
-                     |
-              lib/ (shared infra)
-                     |
-   +--------+--------+--------+--------+--------+--------+
-   |        |        |        |        |        |        |
- BASIC   MONITOR  SNIPER   COPY    ANALYTICS  VOLUME  GRADUATION
-TRADER            BOT    TRADER   DASHBOARD  ANALYZER  SNIPER
-```
-
-### Bots
-
-| Bot | What it does | File |
-|-----|-------------|------|
-| **Basic Trader** | CLI buy/sell/price/balance on bonding curve | `bots/basic-trader/trade.mjs` |
-| **Monitor** | Real-time stream of new tokens + trades via WebSocket | `bots/monitor/stream.mjs` |
-| **Sniper** | Auto-buy on new token creation, exit on TP/SL/timeout | `bots/sniper/sniper.mjs` |
-| **Copy Trader** | Mirror trades from target wallets in real-time | `bots/copy-trader/watcher.mjs` |
-| **Analytics** | Live dashboard at localhost:3000 with volume, top buyers, charts | `bots/analytics/server.mjs` |
-| **Volume Analyzer** | CLI tool to classify wallet strategies and detect patterns | `bots/volume-analyzer/analyzer.mjs` |
-| **Graduation Sniper** | Detects tokens about to graduate to PumpSwap AMM | `bots/graduation-sniper/graduation.mjs` |
-
-### Shared Library (`lib/`)
-
-| Module | Purpose |
-|--------|---------|
-| `config.mjs` | Loads `.env`, slippage, CU budget, tip size |
-| `constants.mjs` | Program IDs, V3 event prefixes, instruction sets |
-| `pumpfun.mjs` | Bonding curve math, buy/sell instructions |
-| `rpc.mjs` | Connection + sendTx with retry |
-| `tx.mjs` | Versioned tx builder, ComputeBudget, Jito tip |
-| `wallet.mjs` | Keypair generation and loading |
-| `ws.mjs` | WebSocket with auto-reconnect |
-
-### Research
-
-| File | Content |
-|------|---------|
-| `docs/strategy-research.md` | 7 strategy classifications, win rates, PnL data |
-| `docs/wallet-analysis.md` | Deep analysis of on-chain wallet behaviors |
-| `docs/GUIDE.md` | Full guide from beginner to advanced |
+<img src="docs/bots.svg" alt="Bot Arsenal" width="100%">
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install
+git clone https://github.com/zostaff/pumpfunbots-reverse.git
+cd pumpfunbots-reverse
 npm install
+cp .env.example .env          # add your Helius API key
+```
 
-# Set up
-cp .env.example .env
-# Edit .env with your Helius RPC URL
-
-# Generate a wallet
+```bash
+# generate a trading wallet
 node -e "import('./lib/wallet.mjs').then(m => m.generateKeypair())"
 
-# Run the monitor
+# monitor new tokens in real-time
 node bots/monitor/stream.mjs
 
-# Run the sniper (dry-run, no real trades)
+# sniper bot (paper trading)
 node bots/sniper/sniper.mjs --dry-run
 
-# Run the dashboard
-node bots/analytics/server.mjs
-# Open http://localhost:3000
+# live analytics dashboard
+node bots/analytics/server.mjs    # open localhost:3000
 ```
 
 ---
 
-## Key Discovery: pump.fun V3 Migration
+## V3 Migration
 
-During development we discovered pump.fun silently migrated to V3 API:
+> pump.fun silently migrated to V3. Every existing bot using old prefixes is dead. We decoded the new format.
 
-| | V2 (old) | V3 (current) |
-|--|---------|-------------|
-| Trade event prefix | `e445a52e51cb9a1d` | `bddb7fd34ee661ee` |
-| Create instruction | `CreateV2` | `BondingCurveV3` |
-| Buy/sell detection | `is_buy` byte in event | Instruction name in logs |
-| Event size | 113 bytes | 390-391 bytes |
-| New features | — | Cashback, holder fees, volume tracking |
+```
+                        V2 (DEAD)                    V3 (LIVE)
+ ──────────────────────────────────────────────────────────────
+  Trade event        e445a52e51cb9a1d            bddb7fd34ee661ee
+  Event size         113 bytes                   390-391 bytes
+  Buy/sell           is_buy byte                 Instruction name
+  Create             CreateV2 event              BondingCurveV3
+  User pubkey        offset 57                   offset 57 (verified)
+  Reserves           not in event                offset 97-113
+  New features       -                           cashback, holder fees
+ ──────────────────────────────────────────────────────────────
+```
 
-All bots in this repo are V3-compatible.
+<details>
+<summary><b>V3 Event Layout (click to expand)</b></summary>
+
+```
+Offset   Size   Field
+───────────────────────────────────────
+0        8      Discriminator (bddb7fd34ee661ee)
+8        32     Mint (Pubkey)
+40       8      SOL amount (u64 lamports)
+48       8      Token amount (u64)
+57       32     User (Pubkey)
+97       8      Virtual SOL reserves (u64)
+105      8      Virtual token reserves (u64)
+113+     278    Extended data
+```
+
+Buy/sell determined from instruction names in tx logs:
+```
+BUY:    Buy, BuyV2, BuyV3, BuyExactQuoteInV2, BuyExactQuoteInV3, BuyExactSolIn
+SELL:   Sell, SellV2, SellV3
+CREATE: BondingCurveV3, BondingCurveJupiter
+```
+
+</details>
 
 ---
 
-## Strategy Research Summary
+## Strategy Research
 
-From analyzing 666 wallets across 7 strategy types:
+```
+ 666 wallets analyzed across 7 strategy types
+ ──────────────────────────────────────────────────────────────
 
-| Strategy | Wallets | Win Rate | Key Signal |
-|----------|---------|----------|------------|
-| Direct High-Freq | 89 | **80%** | No custom programs, CU=0 |
-| Sell-Only | 112 | 62% | Only sells, coordinated ops |
-| Slot-0 Sniper | 67 | 10-45% | Buys in same slot as create |
-| Custom Bot | 203 | 35% | Custom program CPI |
-| Multi-Program | 45 | 40% | Multiple programs per tx |
-| Brute Force | 98 | 25% | High volume, low selectivity |
-| Buy-Only | 52 | 15% | Never sells (honeypot test?) |
+  Direct High-Freq    ██████████████████████████████████████  80%   89 wallets
+  Sell-Only           █████████████████████████               62%  112 wallets
+  Slot-0 Sniper       ██████████████████                      45%   67 wallets
+  Multi-Program       ████████████████                        40%   45 wallets
+  Custom Bot          ██████████████                          35%  203 wallets
+  Brute Force         ██████████                              25%   98 wallets
+  Buy-Only            ██████                                  15%   52 wallets
+```
+
+<details>
+<summary><b>Strategy Details</b></summary>
+
+| Strategy | How it works | Key signal |
+|----------|-------------|------------|
+| **Direct High-Freq** | Standard instructions, CU=0, pure selection edge | No custom programs |
+| **Sell-Only** | Never buys on pump.fun, receives via bundles/airdrops | Coordinated ops |
+| **Slot-0 Sniper** | Buys same slot as token creation | Latency game |
+| **Custom Bot** | Deploys own program, calls pump.fun via CPI | Custom program ID |
+| **Multi-Program** | Multiple programs per tx (buy + tip + routing) | Complex tx layout |
+| **Brute Force** | High volume, low selectivity, needs 4x+ winners | Spray and pray |
+| **Buy-Only** | Never sells on pump.fun (AMM exit or honeypot test) | One-directional |
+
+</details>
+
+---
+
+## Bots
+
+| | Bot | What it does | Run |
+|-|-----|-------------|-----|
+| `01` | **Basic Trader** | CLI buy/sell/price/balance | `node bots/basic-trader/trade.mjs buy <mint> 0.1` |
+| `02` | **Monitor** | Real-time token + trade stream | `node bots/monitor/stream.mjs` |
+| `03` | **Sniper** | Auto-buy on creation, TP/SL exit | `node bots/sniper/sniper.mjs --dry-run` |
+| `04` | **Copy Trader** | Mirror target wallet trades | `node bots/copy-trader/watcher.mjs --dry-run` |
+| `05` | **Analytics** | Live dashboard at :3000 | `node bots/analytics/server.mjs` |
+| `06` | **Volume Analyzer** | Wallet/token strategy classifier | `node bots/volume-analyzer/analyzer.mjs wallet <addr>` |
+| `07` | **Graduation Sniper** | Buy before PumpSwap migration | `node bots/graduation-sniper/graduation.mjs --dry-run` |
+
+<details>
+<summary><b>Shared Library (lib/)</b></summary>
+
+| Module | Purpose |
+|--------|---------|
+| `config.mjs` | `.env` loader, slippage (5%), CU budget, tip size |
+| `constants.mjs` | Program IDs, V3 event prefixes, instruction sets |
+| `pumpfun.mjs` | Bonding curve PDA, state deserialization, buy/sell ix |
+| `rpc.mjs` | Connection + sendTx with retry + confirmation |
+| `tx.mjs` | Versioned tx builder, ComputeBudget, Jito tip |
+| `wallet.mjs` | Keypair load/generate from `keys/` |
+| `ws.mjs` | WebSocket with auto-reconnect |
+
+</details>
+
+---
+
+## Sniper Results (dry-run)
+
+```
+[12:18:22] SNIPING: DYdfB51GxXj1SydBJm8uJbndgPBTs8dYwZEg6yF6pump
+  buying 0.1 SOL -> ~7,235,110 tokens
+  entry: 0.000013566412 SOL/tok
+  [DRY RUN] position tracked
+
+[12:18:25] SELL (take-profit 1.9x)
+  +88.2%, held 3 seconds
+  session: 1 trade, 1W/0L
+
+  45 seconds total: 3 trades, 2W/1L, 66% win rate
+```
+
+---
+
+## PumpSwap AMM
+
+> When a bonding curve fills (~85 SOL), the token graduates to PumpSwap AMM.
+
+```
+ PumpSwap is 1.8x busier than bonding curve
+ ──────────────────────────────────────────
+
+  Events/sec      318 (vs 180 bonding curve)
+  Volume          ~660,000 SOL/min
+  Bot trades      43% under 0.01 SOL
+  Whale trades    8.4% over 10 SOL
+
+  Trade prefix    67f4521f2cf57777  (497 bytes)
+  Fee prefix      3e2f370aa503dc2a  (449 bytes)
+  Program         pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
+```
+
+---
+
+## Landing Providers
+
+> Speed infrastructure identified from tip transfer patterns.
+
+| Provider | Addresses | Notes |
+|----------|-----------|-------|
+| **Jito** | 8 accounts | Dominant. MEV bundles. |
+| **Astralane** | 11 (astr* prefix) | Growing fast |
+| **Nozomi** | 18 (noz* prefix) | Speed-focused |
+| **MoonLander** | 8 (moon* prefix) | Mid-tier |
+| **GMGN.ai** | 9 (gmgn* prefix) | Consumer bots |
+
+Our bots use Jito tips with random account selection.
 
 ---
 
 ## Stack
 
-- **Runtime:** Node.js 22+ (ESM)
-- **Chain:** Solana mainnet via Helius RPC
-- **Programs:** pump.fun `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`, PumpSwap `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA`
-- **Dependencies:** `@solana/web3.js`, `@solana/spl-token`, `bs58`
+```
+Runtime         Node.js 22+ (ESM)
+Chain           Solana mainnet via Helius RPC
+Programs        pump.fun    6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+                PumpSwap    pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
+Dependencies    @solana/web3.js  @solana/spl-token  bs58
+                (3 packages. no frameworks. no build tools.)
+```
 
 ---
 
-## Disclaimer
+## Research
 
-This is research and educational software. Trading memecoins carries extreme risk. Use at your own risk. Start with `--dry-run` and paper trading.
+| File | Content |
+|------|---------|
+| [`docs/strategy-research.md`](docs/strategy-research.md) | 7 strategy classifications, win rates, PnL |
+| [`docs/wallet-analysis.md`](docs/wallet-analysis.md) | Deep on-chain wallet behavior analysis |
+| [`docs/article.md`](docs/article.md) | Full writeup of the reverse engineering process |
+| [`docs/GUIDE.md`](docs/GUIDE.md) | Complete guide from beginner to advanced |
 
 ---
 
-Built with on-chain research. No paid indicators. No subscriptions. Just code.
+<p align="center">
+  <sub>A research tool, not a promise of returns. Start with <code>--dry-run</code>.</sub>
+</p>
+
+<p align="center">
+  <sub>Built from raw on-chain data. No paid signals. No black boxes. Just code.</sub>
+</p>

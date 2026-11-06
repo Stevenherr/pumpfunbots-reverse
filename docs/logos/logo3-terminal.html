@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>FUCKPUMPFUN Logo 3 - Terminal</title>
+<style>
+  body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+</style>
+</head>
+<body>
+<svg width="800" height="800" viewBox="0 0 800 800" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-text">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="scanline">
+      <feImage xlink:href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='2' height='4'%3E%3Crect width='2' height='2' fill='%23000' opacity='0.15'/%3E%3C/svg%3E" width="2" height="4"/>
+      <feTile/>
+      <feBlend mode="multiply" in="SourceGraphic"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="800" fill="#0a0e14"/>
+
+  <!-- Terminal window frame -->
+  <rect x="80" y="80" width="640" height="640" rx="12" fill="#0d1117" stroke="#1a2332" stroke-width="2"/>
+
+  <!-- Title bar -->
+  <rect x="80" y="80" width="640" height="40" rx="12" fill="#161b22"/>
+  <rect x="80" y="108" width="640" height="12" fill="#161b22"/>
+  <!-- Window buttons -->
+  <circle cx="108" cy="100" r="7" fill="#f85149"/>
+  <circle cx="132" cy="100" r="7" fill="#e3b341"/>
+  <circle cx="156" cy="100" r="7" fill="#00ff88"/>
+  <!-- Title -->
+  <text x="400" y="105" text-anchor="middle" font-family="monospace" font-size="13" fill="#8b949e">fuckpumpfun ~ zsh</text>
+
+  <!-- Terminal content -->
+  <g font-family="'Courier New', monospace" font-size="14" filter="url(#glow)">
+    <!-- Line 1 -->
+    <text x="110" y="160" fill="#8b949e">$</text>
+    <text x="130" y="160" fill="#00ff88">./scan</text>
+    <text x="200" y="160" fill="#c9d1d9">--wallets 666 --decode-v3</text>
+
+    <!-- Line 2 -->
+    <text x="110" y="188" fill="#8b949e">[*]</text>
+    <text x="150" y="188" fill="#c9d1d9">Scanning pump.fun program...</text>
+
+    <!-- Line 3 -->
+    <text x="110" y="216" fill="#8b949e">[*]</text>
+    <text x="150" y="216" fill="#c9d1d9">V2 prefix</text>
+    <text x="260" y="216" fill="#f85149">e445a52e51cb9a1d</text>
+    <text x="420" y="216" fill="#f85149">DEAD</text>
+
+    <!-- Line 4 -->
+    <text x="110" y="244" fill="#8b949e">[+]</text>
+    <text x="150" y="244" fill="#c9d1d9">V3 prefix</text>
+    <text x="260" y="244" fill="#00ff88">bddb7fd34ee661ee</text>
+    <text x="420" y="244" fill="#00ff88">LIVE</text>
+
+    <!-- Line 5 -->
+    <text x="110" y="272" fill="#8b949e">[+]</text>
+    <text x="150" y="272" fill="#c9d1d9">Strategies decoded:</text>
+    <text x="350" y="272" fill="#00ff88">7</text>
+
+    <!-- Line 6 -->
+    <text x="110" y="300" fill="#8b949e">[+]</text>
+    <text x="150" y="300" fill="#c9d1d9">Win rates mapped:</text>
+    <text x="340" y="300" fill="#00ff88">15% - 80%</text>
+
+    <!-- Line 7 -->
+    <text x="110" y="328" fill="#8b949e">[+]</text>
+    <text x="150" y="328" fill="#c9d1d9">Landing providers:</text>
+    <text x="340" y="328" fill="#00ff88">10+</text>
+
+    <!-- Line 8 -->
+    <text x="110" y="356" fill="#8b949e">[+]</text>
+    <text x="150" y="356" fill="#c9d1d9">PumpSwap AMM decoded</text>
+    <text x="390" y="356" fill="#00ff88">OK</text>
+
+    <!-- Separator -->
+    <text x="110" y="390" fill="#1a2332">========================================</text>
+  </g>
+
+  <!-- Big ASCII art title -->
+  <g font-family="'Courier New', monospace" filter="url(#glow-text)">
+    <text x="400" y="440" text-anchor="middle" font-size="14" fill="#00ff88" opacity="0.6">
+      ███████╗██╗   ██╗ ██████╗██╗  ██╗
+    </text>
+    <text x="400" y="458" text-anchor="middle" font-size="14" fill="#00ff88" opacity="0.6">
+      ██╔════╝██║   ██║██╔════╝██║ ██╔╝
+    </text>
+    <text x="400" y="476" text-anchor="middle" font-size="14" fill="#00ff88" opacity="0.7">
+      █████╗  ██║   ██║██║     █████╔╝
+    </text>
+    <text x="400" y="494" text-anchor="middle" font-size="14" fill="#00ff88" opacity="0.7">
+      ██╔══╝  ██║   ██║██║     ██╔═██╗
+    </text>
+    <text x="400" y="512" text-anchor="middle" font-size="14" fill="#00ff88" opacity="0.8">
+      ██║     ╚██████╔╝╚██████╗██║  ██╗
+    </text>
+  </g>
+
+  <!-- FUCKPUMPFUN big text -->
+  <g filter="url(#glow-text)">
+    <text x="400" y="570" text-anchor="middle" font-family="'Courier New', monospace" font-size="56" font-weight="bold" fill="#00ff88" letter-spacing="2">FUCKPUMPFUN</text>
+  </g>
+
+  <!-- Blinking cursor line -->
+  <g font-family="'Courier New', monospace" font-size="14">
+    <text x="110" y="630" fill="#8b949e">$</text>
+    <text x="130" y="630" fill="#00ff88">bots ready</text>
+    <text x="240" y="630" fill="#c9d1d9">_</text>
+    <rect x="240" y="618" width="9" height="16" fill="#00ff88" opacity="0.8">
+      <animate attributeName="opacity" values="0.8;0;0.8" dur="1.2s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+
+  <!-- Status bar at bottom -->
+  <rect x="80" y="680" width="640" height="30" fill="#161b22" rx="0"/>
+  <rect x="80" y="698" width="640" height="12" rx="12" fill="#161b22"/>
+  <text x="100" y="700" font-family="monospace" font-size="11" fill="#00ff88">7 bots</text>
+  <text x="200" y="700" font-family="monospace" font-size="11" fill="#8b949e">|</text>
+  <text x="220" y="700" font-family="monospace" font-size="11" fill="#00ff88">V3 API</text>
+  <text x="320" y="700" font-family="monospace" font-size="11" fill="#8b949e">|</text>
+  <text x="340" y="700" font-family="monospace" font-size="11" fill="#00ff88">666 wallets</text>
+  <text x="480" y="700" font-family="monospace" font-size="11" fill="#8b949e">|</text>
+  <text x="500" y="700" font-family="monospace" font-size="11" fill="#00ff88">open source</text>
+</svg>
+</body>
+</html>

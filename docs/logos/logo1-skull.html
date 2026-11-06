@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>FUCKPUMPFUN Logo 1 - Skull</title>
+<style>
+  body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+</style>
+</head>
+<body>
+<svg width="800" height="800" viewBox="0 0 800 800" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-strong">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00ff88"/>
+      <stop offset="100%" style="stop-color:#00d4ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="800" fill="#0d1117"/>
+
+  <!-- Outer ring -->
+  <circle cx="400" cy="340" r="220" fill="none" stroke="url(#grad1)" stroke-width="2" opacity="0.3" filter="url(#glow)"/>
+
+  <!-- Skull shape -->
+  <g filter="url(#glow)">
+    <!-- Skull top -->
+    <path d="M280 320 Q280 200 400 180 Q520 200 520 320 Q520 380 500 400 L300 400 Q280 380 280 320Z"
+          fill="none" stroke="#00ff88" stroke-width="3"/>
+    <!-- Jaw -->
+    <path d="M310 400 L310 440 Q310 470 340 470 L460 470 Q490 470 490 440 L490 400"
+          fill="none" stroke="#00ff88" stroke-width="3"/>
+
+    <!-- Left eye - terminal cursor -->
+    <rect x="330" y="270" width="50" height="60" rx="5" fill="none" stroke="#00ff88" stroke-width="2.5"/>
+    <rect x="338" y="280" width="12" height="20" fill="#00ff88" opacity="0.8">
+      <animate attributeName="opacity" values="0.8;0.2;0.8" dur="1s" repeatCount="indefinite"/>
+    </rect>
+    <text x="340" y="320" font-family="monospace" font-size="11" fill="#00ff88" opacity="0.6">&gt;_</text>
+
+    <!-- Right eye - Solana diamond -->
+    <g transform="translate(445, 300)">
+      <path d="M-20 -15 L20 -15 L25 -5 L0 20 L-25 -5Z" fill="none" stroke="#00d4ff" stroke-width="2.5"/>
+      <path d="M-15 -10 L15 -10" stroke="#00d4ff" stroke-width="1.5"/>
+      <path d="M-18 -5 L18 -5" stroke="#00d4ff" stroke-width="1.5"/>
+      <path d="M-12 5 L12 5" stroke="#00d4ff" stroke-width="1.5"/>
+    </g>
+
+    <!-- Teeth -->
+    <line x1="340" y1="400" x2="340" y2="440" stroke="#00ff88" stroke-width="2"/>
+    <line x1="370" y1="400" x2="370" y2="445" stroke="#00ff88" stroke-width="2"/>
+    <line x1="400" y1="400" x2="400" y2="440" stroke="#00ff88" stroke-width="2"/>
+    <line x1="430" y1="400" x2="430" y2="445" stroke="#00ff88" stroke-width="2"/>
+    <line x1="460" y1="400" x2="460" y2="440" stroke="#00ff88" stroke-width="2"/>
+
+    <!-- Circuit lines from skull -->
+    <path d="M280 300 L240 300 L240 260 L220 260" fill="none" stroke="#00ff88" stroke-width="1.5" opacity="0.4"/>
+    <circle cx="220" cy="260" r="3" fill="#00ff88" opacity="0.4"/>
+    <path d="M520 300 L560 300 L560 260 L580 260" fill="none" stroke="#00ff88" stroke-width="1.5" opacity="0.4"/>
+    <circle cx="580" cy="260" r="3" fill="#00ff88" opacity="0.4"/>
+    <path d="M280 350 L230 350 L230 390" fill="none" stroke="#00ff88" stroke-width="1.5" opacity="0.4"/>
+    <circle cx="230" cy="390" r="3" fill="#00ff88" opacity="0.4"/>
+    <path d="M520 350 L570 350 L570 390" fill="none" stroke="#00ff88" stroke-width="1.5" opacity="0.4"/>
+    <circle cx="570" cy="390" r="3" fill="#00ff88" opacity="0.4"/>
+
+    <!-- Nose -->
+    <path d="M390 350 L400 370 L410 350" fill="none" stroke="#00ff88" stroke-width="2"/>
+  </g>
+
+  <!-- Main text -->
+  <g filter="url(#glow-strong)">
+    <text x="400" y="550" text-anchor="middle" font-family="'Courier New', monospace" font-size="52" font-weight="bold" fill="#00ff88" letter-spacing="4">FUCKPUMPFUN</text>
+  </g>
+
+  <!-- Subtitle -->
+  <text x="400" y="590" text-anchor="middle" font-family="'Courier New', monospace" font-size="16" fill="#8b949e" letter-spacing="8">ON-CHAIN INTELLIGENCE</text>
+
+  <!-- Bottom accent line -->
+  <line x1="250" y1="620" x2="550" y2="620" stroke="url(#grad1)" stroke-width="1" opacity="0.5" filter="url(#glow)"/>
+
+  <!-- Small decorative elements -->
+  <text x="400" y="660" text-anchor="middle" font-family="monospace" font-size="12" fill="#00ff88" opacity="0.3">[ 666 wallets / 7 strategies / V3 decoded ]</text>
+</svg>
+</body>
+</html>

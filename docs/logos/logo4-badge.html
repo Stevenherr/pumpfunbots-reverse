@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>FUCKPUMPFUN Logo 4 - Badge</title>
+<style>
+  body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+</style>
+</head>
+<body>
+<svg width="800" height="800" viewBox="0 0 800 800" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-strong">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <linearGradient id="ring-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00ff88"/>
+      <stop offset="50%" style="stop-color:#00d4ff"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="800" fill="#0d1117"/>
+
+  <!-- Outer hexagon -->
+  <polygon points="400,80 660,230 660,530 400,680 140,530 140,230"
+           fill="none" stroke="url(#ring-grad)" stroke-width="3" opacity="0.4" filter="url(#glow)"/>
+
+  <!-- Inner hexagon -->
+  <polygon points="400,140 610,260 610,500 400,620 190,500 190,260"
+           fill="#0d1117" stroke="#1a2332" stroke-width="2"/>
+
+  <!-- Matrix/data rain effect -->
+  <g font-family="monospace" font-size="11" fill="#00ff88" opacity="0.08">
+    <text x="210" y="290">e445a52e</text>
+    <text x="210" y="310">51cb9a1d</text>
+    <text x="210" y="330">bddb7fd3</text>
+    <text x="210" y="350">4ee661ee</text>
+    <text x="210" y="370">6EF8rrec</text>
+    <text x="210" y="390">thR5Dkzo</text>
+    <text x="210" y="410">n8Nwu78h</text>
+
+    <text x="530" y="290">67f45211</text>
+    <text x="530" y="310">2cf57777</text>
+    <text x="530" y="330">3e2f370a</text>
+    <text x="530" y="350">a503dc2a</text>
+    <text x="530" y="370">pAMMBay6</text>
+    <text x="530" y="390">oceH9fJK</text>
+    <text x="530" y="410">BRHGPn52</text>
+  </g>
+
+  <!-- Center icon - crosshair/target -->
+  <g filter="url(#glow)" transform="translate(400, 340)">
+    <!-- Outer ring -->
+    <circle cx="0" cy="0" r="80" fill="none" stroke="#00ff88" stroke-width="2" stroke-dasharray="10,5"/>
+    <!-- Inner ring -->
+    <circle cx="0" cy="0" r="50" fill="none" stroke="#00ff88" stroke-width="1.5"/>
+    <!-- Crosshair -->
+    <line x1="-90" y1="0" x2="-55" y2="0" stroke="#00ff88" stroke-width="1.5"/>
+    <line x1="55" y1="0" x2="90" y2="0" stroke="#00ff88" stroke-width="1.5"/>
+    <line x1="0" y1="-90" x2="0" y2="-55" stroke="#00ff88" stroke-width="1.5"/>
+    <line x1="0" y1="55" x2="0" y2="90" stroke="#00ff88" stroke-width="1.5"/>
+
+    <!-- Center F -->
+    <text x="0" y="18" text-anchor="middle" font-family="'Courier New', monospace" font-size="50" font-weight="bold" fill="#00ff88">F</text>
+
+    <!-- Rotating scanner -->
+    <line x1="0" y1="0" x2="0" y2="-78" stroke="#00ff88" stroke-width="1" opacity="0.5">
+      <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="8s" repeatCount="indefinite"/>
+    </line>
+
+    <!-- Corner brackets -->
+    <path d="M-45 -45 L-45 -35 M-45 -45 L-35 -45" fill="none" stroke="#00d4ff" stroke-width="2"/>
+    <path d="M45 -45 L45 -35 M45 -45 L35 -45" fill="none" stroke="#00d4ff" stroke-width="2"/>
+    <path d="M-45 45 L-45 35 M-45 45 L-35 45" fill="none" stroke="#00d4ff" stroke-width="2"/>
+    <path d="M45 45 L45 35 M45 45 L35 45" fill="none" stroke="#00d4ff" stroke-width="2"/>
+  </g>
+
+  <!-- Diagonal labels -->
+  <g font-family="monospace" font-size="12" fill="#8b949e" opacity="0.5">
+    <text x="240" y="200" transform="rotate(-30 240 200)">SNIPER</text>
+    <text x="490" y="200" transform="rotate(30 490 200)">MONITOR</text>
+    <text x="200" y="500" transform="rotate(30 200 500)">COPY</text>
+    <text x="530" y="500" transform="rotate(-30 530 500)">ANALYZE</text>
+  </g>
+
+  <!-- Stats on hex sides -->
+  <g font-family="monospace" font-size="13" fill="#00ff88" opacity="0.6">
+    <text x="400" y="168" text-anchor="middle">666 WALLETS</text>
+    <text x="400" y="608" text-anchor="middle">7 STRATEGIES</text>
+  </g>
+
+  <!-- Main title -->
+  <g filter="url(#glow-strong)">
+    <text x="400" y="500" text-anchor="middle" font-family="'Courier New', monospace" font-size="38" font-weight="bold" fill="#00ff88" letter-spacing="3">FUCKPUMPFUN</text>
+  </g>
+
+  <!-- Bottom text -->
+  <text x="400" y="530" text-anchor="middle" font-family="monospace" font-size="14" fill="#8b949e" letter-spacing="4">REVERSE ENGINEERED</text>
+
+  <!-- Corner decorations -->
+  <g stroke="#1a2332" stroke-width="1" fill="none">
+    <path d="M30 30 L80 30 M30 30 L30 80"/>
+    <path d="M770 30 L720 30 M770 30 L770 80"/>
+    <path d="M30 770 L80 770 M30 770 L30 720"/>
+    <path d="M770 770 L720 770 M770 770 L770 720"/>
+  </g>
+
+  <!-- Version tag -->
+  <text x="400" y="750" text-anchor="middle" font-family="monospace" font-size="11" fill="#1a2332">v3.0 // pump.fun V3 API // open source</text>
+</svg>
+</body>
+</html>
