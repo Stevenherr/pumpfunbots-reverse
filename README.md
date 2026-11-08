@@ -7,7 +7,7 @@
   <a href="#v3-migration"><img src="https://img.shields.io/badge/pump.fun-V3%20decoded-00ff9c?style=flat-square&labelColor=08090b" alt="V3 decoded"></a>
   <a href="#strategy-research"><img src="https://img.shields.io/badge/wallets-666-a8ff00?style=flat-square&labelColor=08090b" alt="666 wallets"></a>
   <a href="#bots"><img src="https://img.shields.io/badge/bots-7-ffb800?style=flat-square&labelColor=08090b" alt="7 bots"></a>
-  <a href="#stack"><img src="https://img.shields.io/badge/deps-3-7c8391?style=flat-square&labelColor=08090b" alt="3 deps"></a>
+  <a href="#stack"><img src="https://img.shields.io/badge/deps-4-7c8391?style=flat-square&labelColor=08090b" alt="4 deps"></a>
 </p>
 
 <p align="center">
@@ -150,8 +150,24 @@ CREATE: BondingCurveV3, BondingCurveJupiter
 | `tx.mjs` | Versioned tx builder, ComputeBudget, Jito tip |
 | `wallet.mjs` | Keypair load/generate from `keys/` |
 | `ws.mjs` | WebSocket with auto-reconnect |
+| `rugcheck.mjs` | Rug-Check vor jedem Kauf |
+| `buy-gate.mjs` | Freigabe oder `--dry-run`, danach erst Signatur |
+| `approval.mjs` | Lokale Freigabe-Warteschlange |
+| `positions.mjs` | Fill-Preis, Stop-Loss, Positionen auf der Platte |
 
 </details>
+
+## Sicherheitslayer
+
+Sniper, Copy-Trader und Graduation-Sniper kaufen nicht mehr blind.
+
+- **Rug-Check** (`lib/rugcheck.mjs`) vor jedem Kauf. Abgelehnt wird bei gesetzter Mint- oder Freeze-Authority, zu hohem Anteil des größten Holders, zu hohem Dev-Buy des Creators, zu vielen Launches oder Signaturen des Creators und bei zu dünner realer Liquidität. Schwellen stehen in `.env.example`. Jede Ablehnung landet mit Grund im Log.
+- **Freigabe.** Standardmäßig signiert der Bot einen Kauf nicht selbst. Er schreibt Token, Betrag, Grund und Rug-Check-Ergebnis nach `data/approvals.json` und wartet. Freigeben: `node bots/approve.mjs approve <id>` oder der Button im lokalen Dashboard. Unbestätigte Vorschläge verfallen (`APPROVAL_TTL_SEC`). `AUTO_BUY=1` oder `--auto` ist der Opt-out und ist standardmäßig aus. `--dry-run` signiert nie, auch nicht zusammen mit `--auto`.
+- **Stop-Loss −6 %.** `SNIPER_STOP_LOSS`, `COPY_STOP_LOSS` und `GRAD_STOP_LOSS` stehen standardmäßig auf `0.94` und beziehen sich auf den Fill-Preis. Die Prüfung läuft über den Trade-Websocket, zusätzlich alle 400 ms. Offene Positionen liegen unter `data/positions/` und werden nach einem Neustart weiter überwacht. Ein Stop-Loss-Verkauf wartet nicht auf eine zweite Freigabe.
+
+Die Offline-Simulation unter `simulation/` fährt dieselben Regeln mit Spielgeld. Siehe `simulation/README.md`.
+
+
 
 ---
 
@@ -221,8 +237,8 @@ Runtime         Node.js 22+ (ESM)
 Chain           Solana mainnet via Helius RPC
 Programs        pump.fun    6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
                 PumpSwap    pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
-Dependencies    @solana/web3.js  @solana/spl-token  bs58
-                (3 packages. no frameworks. no build tools.)
+Dependencies    @solana/web3.js  @solana/spl-token  bs58  ws
+                (4 packages. no frameworks. no build tools.)
 ```
 
 ---

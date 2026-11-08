@@ -17,6 +17,7 @@ import {
   CREATE_INSTRUCTIONS,
 } from "../../lib/constants.mjs";
 import { SolanaWs } from "../../lib/ws.mjs";
+import { handleApprovalHttp } from "../../lib/approval-http.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.ANALYTICS_PORT || 3000);
@@ -185,6 +186,7 @@ function getApiResponse() {
 }
 
 const server = http.createServer((req, res) => {
+  if (handleApprovalHttp(req, res)) return;
   if (req.url === "/api/stats") {
     res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
     res.end(JSON.stringify(getApiResponse()));

@@ -64,7 +64,7 @@ WebSocket → BondingCurveV3 детект → проверка dev-buy → getBo
 **Параметры (ENV):**
 - `SNIPER_BUY_SOL` — сколько SOL вкладывать (default: 0.1)
 - `SNIPER_TAKE_PROFIT` — множитель для TP (default: 2.0x)
-- `SNIPER_STOP_LOSS` — множитель для SL (default: 0.5x)
+- `SNIPER_STOP_LOSS` — множитель для SL от fill-цены (default: 0.94x, то есть −6%)
 - `SNIPER_TIMEOUT_SEC` — макс. время удержания (default: 120s)
 - `SNIPER_MIN_DEV_BUY` — минимальная покупка dev'а в SOL (фильтр)
 - `SNIPER_MAX_POSITIONS` — макс. одновременных позиций
@@ -163,7 +163,7 @@ WebSocket → parse V3 TradeEvent → read reserves from event data (offset 97-1
 - `GRAD_BUY_SOL` — сумма покупки (default: 0.1)
 - `GRAD_MIN_FILL_PCT` — минимальный % заполнения (default: 92)
 - `GRAD_TAKE_PROFIT` — TP множитель (default: 1.5x)
-- `GRAD_STOP_LOSS` — SL множитель (default: 0.7x)
+- `GRAD_STOP_LOSS` — SL множитель от fill-цены (default: 0.94x, то есть −6%)
 - `GRAD_TIMEOUT_SEC` — таймаут позиции (default: 300s)
 - `GRAD_MAX_POSITIONS` — макс. позиций (default: 3)
 

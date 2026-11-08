@@ -21,3 +21,20 @@ python3 simulation/harness.py
 ```
 
 Beide Befehle brauchen nur die Python-Standardbibliothek. Abhängigkeiten des Repos nicht installieren.
+
+## Sicherheitskampagne (weiterhin synthetisch)
+
+`safety_campaign.py` bildet den Rug-Check, die Freigabe und den Stop von 0,94 auf dem Fill ab. Das JavaScript wird nicht ausgeführt. Es gibt kein Netz und kein Wallet.
+
+Startguthaben der Kampagne: **1,00 SOL**, synthetisch, kein Marktkurs. Kaufgröße 0,05 SOL. Take-Profit bei 2,0 vom Fill, nur als feste Testregel. Gebühren wie im bestehenden Harness.
+
+Der Rug-Check lehnt Mint-Authority, Freeze-Authority, Holder über 20 %, Dev-Buy über 10 %, mehr als 3 Launches, mehr als 40 Creator-Signaturen und reale Liquidität unter 0,4 SOL ab. Dieselben Schwellen sind die Defaults in `lib/rugcheck.mjs`.
+
+Die Freigabe kennt vier Ausgänge: Mensch gibt frei, Mensch lehnt ab, Vorschlag verfällt, `AUTO_BUY` kauft ohne Mensch. `AUTO_BUY` überspringt den Rug-Check nicht. Ein synthetischer Rug nach dem Einstieg wird beim ersten Print auf 0,94 geschlossen. Ein Vergleichsfall verkauft erst bei 0,40 des Fills, als wäre nur selten gepollt worden.
+
+```bash
+python3 simulation/safety_campaign.py
+python3 simulation/test_harness.py -v
+```
+
+Die gedruckten SOL-Beträge sind Spielgeld.
