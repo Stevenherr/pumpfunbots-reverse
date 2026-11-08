@@ -150,6 +150,50 @@ def is_deferred(signals: dict) -> bool:
     return bool(signals.get("rate_limited"))
 
 
+def sniper_launch(
+    real_sol,
+    *,
+    seen: bool = False,
+    stopped: bool = False,
+    cooldown_until: int = 0,
+    now: int = 0,
+    held_by_other: bool = False,
+    max_real: Decimal = D("12"),
+) -> str:
+    if held_by_other:
+        return "held_by_other_bot"
+    if stopped:
+        return "reentry_after_stop"
+    if cooldown_until and now < cooldown_until:
+        return "token_cooldown"
+    if seen:
+        return "already_seen"
+    if real_sol is None:
+        return "curve_unknown"
+    if real_sol > max_real:
+        return "curve_not_fresh"
+    return "buy"
+
+
+def quiet_timeout(timeout_s: int = 120, sweep_s: int = 1) -> dict:
+    """No prices at all. The wall-clock sweep closes on the first tick at or after timeout."""
+    close_after = timeout_s + sweep_s
+    return {
+        "timeout_s": timeout_s,
+        "closed_after_s": close_after,
+        "late_by_s": close_after - timeout_s,
+        "stale_price": True,
+        "still_open_before": timeout_s - 1,
+    }
+
+
+def first_visible_stop(marks: list[Decimal], trigger: Decimal) -> Decimal:
+    for mark in marks:
+        if mark <= trigger:
+            return mark
+    return marks[-1]
+
+
 def entry_decision(
     *,
     now: int,
@@ -345,6 +389,18 @@ def run_campaign() -> dict:
         "graduation": graduation,
         "slippage_at_trigger_pnl": one_stop(D("0.94")),
         "slippage_delayed_fill_pnl": one_stop(D("0.90")),
+        "launch": {
+            "fresh": sniper_launch(D("1.5")),
+            "stale": sniper_launch(D("35")),
+            "repeat": sniper_launch(D("1.5"), seen=True),
+            "stopped": sniper_launch(D("1.5"), stopped=True),
+            "cooldown": sniper_launch(D("1.5"), cooldown_until=600, now=10),
+            "shared": sniper_launch(D("1.5"), held_by_other=True),
+        },
+        "fast_watch_ratio": first_visible_stop(
+            [D("1"), D("0.98"), D("0.97"), D("0.90"), D("0.71")], STOP_RATIO + D("0.03")
+        ),
+        "slow_watch_ratio": D("0.71"),
         "approval_rejected": approval_rejected,
         "approval_expired": approval_expired,
         "auto_buys": auto_buys,
@@ -354,6 +410,11 @@ def run_campaign() -> dict:
         "fast_rug_pnl": fast["pnl"],
         "slow_rug_pnl": slow_pnl,
         "queue": queue.items,
+        "fast_watch_pnl": one_stop(
+            first_visible_stop([D("1"), D("0.98"), D("0.97"), D("0.90"), D("0.71")], STOP_RATIO + D("0.03"))
+        ),
+        "slow_watch_pnl": one_stop(D("0.71")),
+        "quiet_timeout": quiet_timeout(),
     }
 
 
@@ -392,6 +453,24 @@ def format_report(result: dict) -> str:
             "Graduation-Bestätigung: Dip "
             f"{result['graduation']['dip']}, stabil {result['graduation']['stable']}, "
             f"Wiedereinstieg {result['graduation']['reentry']}"
+        ),
+        (
+            "Sniper-Einstieg: frisch "
+            f"{result['launch']['fresh']}, alt {result['launch']['stale']}, "
+            f"wiederholt {result['launch']['repeat']}, Stop {result['launch']['stopped']}, "
+            f"gemeinsam {result['launch']['shared']}"
+        ),
+        (
+            f"Schneller Stop mit 0.03 Margin bei {result['fast_watch_ratio']} "
+            f"PnL {money(result['fast_watch_pnl'])} SOL; "
+            f"nur spätes Update bei {result['slow_watch_ratio']} "
+            f"PnL {money(result['slow_watch_pnl'])} SOL"
+        ),
+        (
+            "Timeout ohne Preisupdate: konfiguriert "
+            f"{result['quiet_timeout']['timeout_s']}s, geschlossen nach "
+            f"{result['quiet_timeout']['closed_after_s']}s "
+            f"(+{result['quiet_timeout']['late_by_s']}s, stale entry price)"
         ),
         "Gebührenannahme: Priorität 0.00012, Tip 0.0001, Basis 0.000005, Protokoll 1%.",
         "Stop 0.94 vom Fill-Preis, Take-Profit 2.0, Kaufgröße 0.05 SOL. Alles synthetisch.",

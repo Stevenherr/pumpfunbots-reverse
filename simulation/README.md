@@ -34,6 +34,8 @@ Die Freigabe kennt vier Ausgänge: Mensch gibt frei, Mensch lehnt ab, Vorschlag 
 
 Die Graduation-Regel armt den ersten Print nur. Ein Dip über 2 % in 8 Sekunden kauft nicht. Ein Stop blockiert den Wiedereinstieg.
 
+Der Sniper kauft nur eine frische Curve (höchstens 12 SOL real) und denselben Mint kein zweites Mal. Ein spätes Preisupdate bei 0,71 verkauft schlechter als ein schneller Trigger bei 0,97 (Stop 0,94 plus 0,03 Marge).
+
 ```bash
 python3 simulation/safety_campaign.py
 python3 simulation/test_harness.py -v
