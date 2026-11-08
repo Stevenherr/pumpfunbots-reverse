@@ -18,7 +18,8 @@ THRESHOLDS = {
     "max_top_holder_pct": D("20"),
     "max_dev_buy_share_pct": D("10"),
     "max_creator_launches": 3,
-    "max_creator_signatures": 40,
+    "max_creator_rugs": 0,
+    "max_creator_signatures": 0,
     "min_real_sol": D("0.4"),
     "fail_closed": True,
 }
@@ -38,6 +39,8 @@ def fmt_sol(value: Decimal) -> str:
 
 def evaluate_rug(signals: dict, thresholds: dict | None = None) -> list[str]:
     rules = thresholds or THRESHOLDS
+    if signals.get("rate_limited"):
+        return ["rate_limited_defer"]
     reasons: list[str] = []
     if signals.get("unavailable") and rules["fail_closed"]:
         reasons.append(f"rug_data_unavailable: {signals['unavailable']}")
@@ -76,8 +79,20 @@ def evaluate_rug(signals: dict, thresholds: dict | None = None) -> list[str]:
     if launches is not None and launches > rules["max_creator_launches"]:
         reasons.append(f"creator_launches {launches} > {rules['max_creator_launches']}")
 
+    rugs = signals.get("creator_rugs")
+    if rugs is not None and rugs > rules["max_creator_rugs"]:
+        reasons.append(f"creator_rugs {rugs} > {rules['max_creator_rugs']}")
+
+    # A full signature page is a lookup cap, not a count. Only an uncapped
+    # sample can trip the optional raw-signature rule, and that rule is off
+    # when max_creator_signatures is 0.
     signatures = signals.get("creator_signatures")
-    if signatures is not None and signatures > rules["max_creator_signatures"]:
+    if (
+        not signals.get("creator_signatures_capped")
+        and rules["max_creator_signatures"] > 0
+        and signatures is not None
+        and signatures > rules["max_creator_signatures"]
+    ):
         reasons.append(
             f"creator_signatures {signatures} > {rules['max_creator_signatures']}"
         )
@@ -131,6 +146,38 @@ class ApprovalQueue:
                 item["status"] = "expired"
 
 
+def is_deferred(signals: dict) -> bool:
+    return bool(signals.get("rate_limited"))
+
+
+def entry_decision(
+    *,
+    now: int,
+    first_ts: int | None,
+    first_spot: Decimal | None,
+    spot: Decimal,
+    fill_pct: Decimal,
+    confirm_sec: int = 8,
+    max_dip: Decimal = D("0.02"),
+    blocked: bool = False,
+    cooldown_until: int = 0,
+    min_fill: Decimal = D("92"),
+) -> str:
+    if blocked:
+        return "reentry_after_stop"
+    if cooldown_until and now < cooldown_until:
+        return "token_cooldown"
+    if fill_pct < min_fill or fill_pct >= 100:
+        return "outside_fill_band"
+    if first_ts is None or first_spot is None:
+        return "arm"
+    if now - first_ts < confirm_sec:
+        return "wait"
+    if max_dip > 0 and first_spot > 0 and (first_spot - spot) / first_spot > max_dip:
+        return "confirm_dip"
+    return "buy"
+
+
 def clean_token(**overrides: object) -> dict:
     base: dict = {
         "mint_authority_set": False,
@@ -165,6 +212,7 @@ def run_campaign() -> dict:
     )
     queue = ApprovalQueue()
     rejected = []
+    deferred = []
     approval_rejected = []
     approval_expired = []
     trades = []
@@ -178,9 +226,12 @@ def run_campaign() -> dict:
         ("WHALE", clean_token(top_holder_pct=D("45")), "approve", None),
         ("DEVHEAVY", clean_token(dev_buy_share_pct=D("25")), "approve", None),
         ("SERIAL", clean_token(creator_launches=6), "approve", None),
-        ("BUSYDEV", clean_token(creator_signatures=90), "approve", None),
+        ("PRIOR_RUG", clean_token(creator_rugs=2), "approve", None),
+        ("CAPPED", clean_token(creator_signatures=100, creator_signatures_capped=True), "approve", [D("2")]),
+        ("CONFIRM_WIN", clean_token(), "approve", [D("2")]),
         ("THIN", clean_token(real_sol=D("0.05")), "approve", None),
         ("COMBO", clean_token(mint_authority_set=True, real_sol=D("0.01")), "approve", None),
+        ("RATE", {"rate_limited": True}, "approve", None),
         ("AUTO_MINT", clean_token(mint_authority_set=True), "auto", None),
         ("HUMAN_NO", clean_token(), "reject", None),
         ("EXPIRED", clean_token(), "expire", None),
@@ -193,6 +244,9 @@ def run_campaign() -> dict:
     ]
 
     for mint, signals, approval, path in cases:
+        if is_deferred(signals):
+            deferred.append({"mint": mint, "reasons": evaluate_rug(signals)})
+            continue
         reasons = evaluate_rug(signals)
         if reasons:
             rejected.append({"mint": mint, "reasons": reasons, "approval": approval})
@@ -248,6 +302,30 @@ def run_campaign() -> dict:
     slow_pnl = slow.positions["RUG_SLOW"].cash_pnl()
     fast = next(row for row in trades if row["mint"] == "RUG_FAST")
 
+    def one_stop(ratio: Decimal) -> Decimal:
+        side = harness.ProposedBook(START_SOL, stop_ratio=STOP_RATIO, take_profit_ratio=TAKE_PROFIT_RATIO)
+        side_curve = harness.fresh_curve()
+        side.try_buy("SLIP", side_curve, BUY_SOL)
+        fill = side.positions["SLIP"].sol_in / side.positions["SLIP"].tokens
+        side_curve.set_spot(fill * ratio)
+        side.try_sell("SLIP", side_curve, reason="stop_loss")
+        pnl = side.positions["SLIP"].cash_pnl()
+        if pnl is None:
+            raise RuntimeError("slippage side book did not close")
+        return pnl
+
+    graduation = {
+        "dip": entry_decision(
+            now=8, first_ts=0, first_spot=D("1"), spot=D("0.97"), fill_pct=D("95"),
+        ),
+        "stable": entry_decision(
+            now=8, first_ts=0, first_spot=D("1"), spot=D("0.99"), fill_pct=D("95"),
+        ),
+        "reentry": entry_decision(
+            now=20, first_ts=0, first_spot=D("1"), spot=D("1"), fill_pct=D("95"), blocked=True,
+        ),
+    }
+
     closed = [row for row in trades if row.get("pnl") is not None]
     wins = [row for row in closed if row["pnl"] > 0]
     losses = [row for row in closed if row["pnl"] <= 0]
@@ -263,6 +341,10 @@ def run_campaign() -> dict:
         "win_rate": (D(len(wins)) / D(len(closed))) if closed else D(0),
         "stop_loss_hits": len(stops),
         "rejected": rejected,
+        "deferred": deferred,
+        "graduation": graduation,
+        "slippage_at_trigger_pnl": one_stop(D("0.94")),
+        "slippage_delayed_fill_pnl": one_stop(D("0.90")),
         "approval_rejected": approval_rejected,
         "approval_expired": approval_expired,
         "auto_buys": auto_buys,
@@ -292,6 +374,7 @@ def format_report(result: dict) -> str:
         ),
         f"Stop-Loss-Treffer: {result['stop_loss_hits']}",
         f"Abgelehnte Token: {len(result['rejected'])}",
+        f"Rate-Limit verschoben (kein Kauf, kein Rug): {len(result['deferred'])}",
     ]
     for row in result["rejected"]:
         lines.append(f"  {row['mint']}: {', '.join(row['reasons'])}")
@@ -303,6 +386,13 @@ def format_report(result: dict) -> str:
         "AUTO_BUY trotzdem vom Rug-Check gestoppt: " + ", ".join(result["auto_rejected"]),
         f"Schneller Stop RUG_FAST PnL: {money(result['fast_rug_pnl'])} SOL",
         f"Langsamer Poll bis 0.40 des Fills PnL: {money(result['slow_rug_pnl'])} SOL",
+        f"Stop am Trigger 0.94 PnL: {money(result['slippage_at_trigger_pnl'])} SOL",
+        f"Fill rutscht auf 0.90 nach dem Trigger PnL: {money(result['slippage_delayed_fill_pnl'])} SOL",
+        (
+            "Graduation-Bestätigung: Dip "
+            f"{result['graduation']['dip']}, stabil {result['graduation']['stable']}, "
+            f"Wiedereinstieg {result['graduation']['reentry']}"
+        ),
         "Gebührenannahme: Priorität 0.00012, Tip 0.0001, Basis 0.000005, Protokoll 1%.",
         "Stop 0.94 vom Fill-Preis, Take-Profit 2.0, Kaufgröße 0.05 SOL. Alles synthetisch.",
     ])

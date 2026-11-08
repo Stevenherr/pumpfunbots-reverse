@@ -43,7 +43,8 @@ test("defaults match the documented rug thresholds", () => {
     maxTopHolderPct: 20,
     maxDevBuySharePct: 10,
     maxCreatorLaunches: 3,
-    maxCreatorSignatures: 40,
+    maxCreatorRugs: 0,
+    maxCreatorSignatures: 0,
     minRealSol: 0.4,
     failClosed: true,
   });
@@ -70,7 +71,7 @@ test("a clean token passes and each risky signal names itself", () => {
     [cleanSignals({ topHolderPct: 45 }), "top_holder_pct 45.00 > 20.00"],
     [cleanSignals({ devBuySharePct: 25 }), "dev_buy_share_pct 25.00 > 10.00"],
     [cleanSignals({ creatorLaunches: 6 }), "creator_launches 6 > 3"],
-    [cleanSignals({ creatorSignatures: 90 }), "creator_signatures 90 > 40"],
+    [cleanSignals({ creatorRugs: 2 }), "creator_rugs 2 > 0"],
     [cleanSignals({ realSol: 0.05 }), "thin_liquidity_sol 0.0500 < 0.4000"],
   ];
   for (const [signals, reason] of cases) {
@@ -78,6 +79,25 @@ test("a clean token passes and each risky signal names itself", () => {
     assert.equal(result.ok, false, reason);
     assert.ok(result.reasons.includes(reason), `${result.reasons.join(" | ")} missing ${reason}`);
   }
+});
+
+test("a full signature page is unknown and a rate limit is deferred", () => {
+  const enabled = loadThresholds({ RUG_MAX_CREATOR_SIGNATURES: "40" });
+  const capped = evaluateRug(cleanSignals({
+    creatorSignatures: 100,
+    creatorSignaturesCapped: true,
+    creatorSignatureLimit: 100,
+  }), enabled);
+  assert.equal(capped.ok, true, capped.reasons.join(" | "));
+  assert.ok(capped.notes.some((note) => note.startsWith("creator_signatures_capped_at_")));
+
+  const counted = evaluateRug(cleanSignals({ creatorSignatures: 90, creatorSignaturesCapped: false }), enabled);
+  assert.ok(counted.reasons.includes("creator_signatures 90 > 40"));
+
+  const deferred = evaluateRug({ rateLimited: true, mintAuthoritySet: null, realSol: null }, thresholds);
+  assert.equal(deferred.deferred, true);
+  assert.equal(deferred.ok, false);
+  assert.deepEqual(deferred.reasons, ["rate_limited_defer"]);
 });
 
 test("boundaries and unknown optional creator fields", () => {

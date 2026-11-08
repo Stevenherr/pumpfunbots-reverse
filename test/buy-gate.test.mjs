@@ -62,6 +62,30 @@ test("dry-run never signs, even if automatic mode is also set", async () => {
   assert.equal(fs.existsSync(file), false);
 });
 
+test("a rate limit defers the buy and does not sign", async () => {
+  const file = tempFile();
+  const lines = [];
+  let signed = 0;
+  const result = await runGuardedBuy({
+    bot: "sniper",
+    mint: "SlowMint",
+    amountSol: 0.1,
+    reason: "create",
+    dryRun: false,
+    autoBuy: true,
+    signals: { rateLimited: true },
+    thresholds,
+    approvalFile: file,
+    log: (line) => lines.push(line),
+    sign: async () => { signed += 1; },
+  });
+  assert.equal(result.proceed, false);
+  assert.equal(result.deferred, true);
+  assert.equal(signed, 0);
+  assert.equal(fs.existsSync(file), false);
+  assert.match(lines.join("\n"), /RUG DEFER SlowMint: rate_limited_defer/);
+});
+
 test("rug rejections are logged and do not sign or queue", async () => {
   const file = tempFile();
   const lines = [];

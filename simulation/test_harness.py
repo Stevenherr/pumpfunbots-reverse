@@ -379,13 +379,21 @@ class SafetyCampaignTests(unittest.TestCase):
         self.assertEqual(result["label"], "SYNTHETIC")
         self.assertEqual(result["starting_balance_sol"], D("1.00"))
         self.assertEqual(safety_campaign.STOP_RATIO, D("0.94"))
-        self.assertEqual(result["trades"], 6)
-        self.assertEqual(result["wins"], 3)
+        self.assertEqual(result["trades"], 8)
+        self.assertEqual(result["wins"], 5)
         self.assertEqual(result["losses"], 3)
-        self.assertEqual(result["win_rate"], D("0.5"))
+        self.assertEqual(result["win_rate"], D("0.625"))
         self.assertEqual(result["stop_loss_hits"], 2)
         self.assertEqual(result["auto_buys"], 1)
-        self.assertEqual(result["human_buys"], 5)
+        self.assertEqual(result["human_buys"], 7)
+        self.assertEqual([row["mint"] for row in result["deferred"]], ["RATE"])
+        self.assertEqual(result["deferred"][0]["reasons"], ["rate_limited_defer"])
+        self.assertNotIn("RATE", {row["mint"] for row in result["rejected"]})
+        self.assertEqual(result["graduation"]["dip"], "confirm_dip")
+        self.assertEqual(result["graduation"]["stable"], "buy")
+        self.assertEqual(result["graduation"]["reentry"], "reentry_after_stop")
+        self.assertLess(result["slippage_delayed_fill_pnl"], result["slippage_at_trigger_pnl"])
+        self.assertLess(result["slippage_at_trigger_pnl"], 0)
         self.assertEqual(result["auto_rejected"], ["AUTO_MINT"])
         self.assertEqual(len(result["approval_rejected"]), 1)
         self.assertEqual(result["approval_rejected"][0]["status"], "rejected")
@@ -401,7 +409,20 @@ class SafetyCampaignTests(unittest.TestCase):
         self.assertIn("top_holder_pct 45.00 > 20.00", by_mint["WHALE"])
         self.assertIn("dev_buy_share_pct 25.00 > 10.00", by_mint["DEVHEAVY"])
         self.assertIn("creator_launches 6 > 3", by_mint["SERIAL"])
-        self.assertIn("creator_signatures 90 > 40", by_mint["BUSYDEV"])
+        self.assertIn("creator_rugs 2 > 0", by_mint["PRIOR_RUG"])
+        self.assertNotIn("CAPPED", by_mint)
+        capped_rules = dict(safety_campaign.THRESHOLDS)
+        capped_rules["max_creator_signatures"] = 40
+        capped = safety_campaign.evaluate_rug(
+            safety_campaign.clean_token(creator_signatures=100, creator_signatures_capped=True),
+            capped_rules,
+        )
+        self.assertFalse(any(reason.startswith("creator_signatures") for reason in capped))
+        counted = safety_campaign.evaluate_rug(
+            safety_campaign.clean_token(creator_signatures=90),
+            capped_rules,
+        )
+        self.assertIn("creator_signatures 90 > 40", counted)
         self.assertIn("thin_liquidity_sol 0.0500 < 0.4000", by_mint["THIN"])
         self.assertIn("mint_authority_still_set", by_mint["COMBO"])
         self.assertIn("thin_liquidity_sol 0.0100 < 0.4000", by_mint["COMBO"])
@@ -416,8 +437,10 @@ class SafetyCampaignTests(unittest.TestCase):
         self.assertEqual(rows["HUMAN_WIN"]["exit"], "take_profit")
         self.assertEqual(rows["DIP_THEN_WIN"]["exit"], "take_profit")
         self.assertEqual(rows["TIMEOUT_FADE"]["exit"], "timeout")
-        for mint in ("AUTO_WIN", "HUMAN_WIN", "DIP_THEN_WIN"):
+        for mint in ("AUTO_WIN", "HUMAN_WIN", "DIP_THEN_WIN", "CAPPED", "CONFIRM_WIN"):
             self.assertGreater(rows[mint]["pnl"], 0)
+        self.assertEqual(rows["CAPPED"]["exit"], "take_profit")
+        self.assertEqual(rows["CONFIRM_WIN"]["exit"], "take_profit")
         for mint in ("STOP_NEAR", "RUG_FAST", "TIMEOUT_FADE"):
             self.assertLess(rows[mint]["pnl"], 0)
         self.assertTrue(all(row["sold"] for row in rows.values()))

@@ -4,6 +4,7 @@
 //
 //   node bots/graduation-sniper/graduation.mjs [--dry-run] [--auto]
 
+import path from "node:path";
 import { PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { defaultApprovalFile, listForBot } from "../../lib/approval.mjs";
@@ -31,9 +32,12 @@ import {
   getBondingCurveState,
   sellIx,
 } from "../../lib/pumpfun.mjs";
+import { entryDecision, loadMintBlock, saveMintBlock } from "../../lib/graduation-entry.mjs";
 import { collectChainRugSignals } from "../../lib/rugcheck-chain.mjs";
 import { evaluateRug, loadThresholds } from "../../lib/rugcheck.mjs";
 import { connection, sendTxWithRetry } from "../../lib/rpc.mjs";
+import { positionPollMs } from "../../lib/rpc-budget.mjs";
+import { createRetryQueue } from "../../lib/retry-queue.mjs";
 import { approvalTtlSec, autoBuyFlag, dryRunFlag, stopRatio } from "../../lib/runtime-flags.mjs";
 import { forEachTradeMark } from "../../lib/trade-event.mjs";
 import { buildVersionedTx, computeBudgetIxs, jitoTipIx } from "../../lib/tx.mjs";
@@ -47,13 +51,20 @@ const STOP_LOSS = stopRatio(process.env.GRAD_STOP_LOSS, DEFAULT_STOP_RATIO);
 const TIMEOUT_SEC = Number(process.env.GRAD_TIMEOUT_SEC || 300);
 const MAX_POSITIONS = Number(process.env.GRAD_MAX_POSITIONS || 3);
 const COOLDOWN_SEC = Number(process.env.GRAD_COOLDOWN_SEC || 30);
-const POLL_MS = 400;
+const TOKEN_COOLDOWN_SEC = Number(process.env.GRAD_TOKEN_COOLDOWN_SEC || 600);
+const NO_REENTRY = !["0", "false", "no", "off"].includes(String(process.env.GRAD_NO_REENTRY_AFTER_STOP ?? "1").toLowerCase());
+const CONFIRM_SEC = Number(process.env.GRAD_CONFIRM_SEC ?? 8);
+const CONFIRM_MAX_DIP = Number(process.env.GRAD_CONFIRM_MAX_DIP ?? 0.02);
+const POLL_MS = positionPollMs();
 const DRY_RUN = dryRunFlag();
 const AUTO_BUY = autoBuyFlag();
 const APPROVAL_TTL = approvalTtlSec();
 const thresholds = loadThresholds();
 const approvalFile = defaultApprovalFile();
 const positionPath = positionFile(ROOT, "graduation-sniper");
+const blockPath = path.join(ROOT, "data", "graduation-block.json");
+const block = loadMintBlock(blockPath);
+const retries = createRetryQueue({ maxAttempts: 3 });
 const VIRTUAL_SOL_AT_GRADUATION = 85_000_000_000n;
 
 const wallet = loadKeypair();
@@ -73,6 +84,17 @@ function log(msg) {
 
 function persist() {
   savePositions(positionPath, positions);
+}
+
+function persistBlock() {
+  saveMintBlock(blockPath, { stopped: block.stopped, cooldown: block.cooldown });
+}
+
+function tokenBlocked(mint, now = Date.now()) {
+  if (NO_REENTRY && block.stopped.has(mint)) return "reentry_after_stop";
+  const until = block.cooldown.get(mint) || 0;
+  if (until > now) return "token_cooldown";
+  return null;
 }
 
 function parseV3TradeEvent(data) {
@@ -98,8 +120,10 @@ function quoteFill(state, decimals) {
   };
 }
 
-async function paperBuy(mint, fillPct, decimals) {
-  const state = await getBondingCurveState(new PublicKey(mint));
+async function paperBuy(mint, fillPct, decimals, snapshot) {
+  const state = snapshot?.virtualSolReserves
+    ? snapshot
+    : await getBondingCurveState(new PublicKey(mint));
   if (!state || state.complete) {
     log(`  bonding curve already complete or unavailable`);
     return;
@@ -166,18 +190,26 @@ async function signBuy(mint, fillPct) {
   log(`  bought, fill ${fill.toExponential(6)} SOL/token`);
 }
 
-async function buyToken(mint, fillPct) {
+async function buyToken(mint, fillPct, snapshot, opts = {}) {
+  const blocked = opts.fromRetry ? null : tokenBlocked(mint);
+  if (blocked) {
+    if (!noted.has(`${mint}:${blocked}`)) {
+      noted.add(`${mint}:${blocked}`);
+      log(`  skip ${mint.slice(0, 12)}: ${blocked}`);
+    }
+    return;
+  }
   if (positions.size + inflight.size >= MAX_POSITIONS) return;
   if (positions.has(mint) || inflight.has(mint)) return;
-  if (Date.now() - lastBuyTime < COOLDOWN_SEC * 1000) return;
-  lastBuyTime = Date.now();
+  if (!opts.fromRetry && Date.now() - lastBuyTime < COOLDOWN_SEC * 1000) return;
   inflight.add(mint);
   try {
     log(`*** PRE-GRADUATION BUY ***`);
     log(`  mint: ${mint}`);
     log(`  fill: ${fillPct.toFixed(1)}% | buying ${BUY_SOL} SOL`);
-    const signals = await collectChainRugSignals({ mint });
-    await runGuardedBuy({
+    const realSol = snapshot?.realSolReserves == null ? null : Number(snapshot.realSolReserves) / 1e9;
+    const signals = await collectChainRugSignals({ mint, realSol });
+    const gated = await runGuardedBuy({
       bot: "graduation-sniper",
       mint,
       amountSol: BUY_SOL,
@@ -190,9 +222,17 @@ async function buyToken(mint, fillPct) {
       ttlSec: APPROVAL_TTL,
       meta: { fillPct, decimals: signals.decimals || 6 },
       log,
-      onPaper: () => paperBuy(mint, fillPct, signals.decimals || 6),
+      onPaper: () => paperBuy(mint, fillPct, signals.decimals || 6, snapshot),
       sign: () => signBuy(mint, fillPct),
     });
+    if (gated.deferred) {
+      const queued = retries.push(mint, 2000, () => buyToken(mint, fillPct, snapshot, { fromRetry: true }));
+      if (!queued) log(`  RUG DEFER give up ${mint.slice(0, 12)}: still no chain data, not buying`);
+      return;
+    }
+    lastBuyTime = Date.now();
+    block.cooldown.set(mint, Date.now() + TOKEN_COOLDOWN_SEC * 1000);
+    persistBlock();
   } catch (err) {
     log(`  buy failed: ${err.message}`);
   } finally {
@@ -210,6 +250,10 @@ async function sellPosition(mint, reason, pnlMult) {
   const pnlSol = BUY_SOL * (pnlMult - 1);
   log(`  ${mint.slice(0, 12)}: ${reason}`);
   try {
+    if (String(reason).startsWith("stop-loss") && NO_REENTRY) {
+      block.stopped.add(mint);
+      persistBlock();
+    }
     if (DRY_RUN) {
       totalTrades++;
       totalPnl += pnlSol;
@@ -340,7 +384,9 @@ function resumeQueuedBuys() {
 log("=== GRADUATION SNIPER ===");
 log(`Wallet: ${wallet.publicKey.toBase58()}`);
 log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x of fill, timeout=${TIMEOUT_SEC}s`);
-log(`Max positions: ${MAX_POSITIONS}, cooldown: ${COOLDOWN_SEC}s, price poll: ${POLL_MS}ms + trade stream`);
+log(`Max positions: ${MAX_POSITIONS}, global cooldown: ${COOLDOWN_SEC}s, per-token cooldown: ${TOKEN_COOLDOWN_SEC}s`);
+log(`Confirm: ${CONFIRM_SEC}s, max dip ${(CONFIRM_MAX_DIP * 100).toFixed(1)}%, no re-entry after stop: ${NO_REENTRY}`);
+log(`Price poll: ${POLL_MS}ms backup + trade stream. Stop stays ${STOP_LOSS} of fill; a later fill can lose more than 6% to slippage.`);
 log(DRY_RUN
   ? "MODE: DRY RUN (no signatures)"
   : AUTO_BUY
@@ -380,13 +426,46 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
       const event = parseV3TradeEvent(data);
       if (!event) continue;
       const fillPct = getFillPct(event.virtualSolReserves);
-      if (fillPct >= MIN_FILL_PCT && fillPct < 100) {
-        const prev = watchlist.get(event.mint);
-        if (!prev || fillPct > prev.fillPct) {
-          watchlist.set(event.mint, { fillPct, ts: Date.now() });
-          log(`WATCHLIST: ${event.mint.slice(0, 12)} fill=${fillPct.toFixed(1)}% vSol=${(Number(event.virtualSolReserves) / 1e9).toFixed(2)}`);
+      const spot = spotSolPerToken(event.virtualSolReserves, event.virtualTokenReserves);
+      const now = Date.now();
+      const prev = watchlist.get(event.mint);
+      const decision = entryDecision({
+        now,
+        firstTs: prev?.firstTs ?? null,
+        firstSpot: prev?.firstSpot ?? null,
+        spot,
+        fillPct,
+        minFillPct: MIN_FILL_PCT,
+        confirmSec: CONFIRM_SEC,
+        maxDip: CONFIRM_MAX_DIP,
+        blocked: NO_REENTRY && block.stopped.has(event.mint),
+        cooldownUntil: block.cooldown.get(event.mint) || 0,
+      });
+      if (decision.action === "arm") {
+        watchlist.set(event.mint, { firstTs: now, firstSpot: spot, fillPct, ts: now, decided: false });
+        log(`WATCHLIST: ${event.mint.slice(0, 12)} fill=${fillPct.toFixed(1)}% confirm ${CONFIRM_SEC}s`);
+      } else if (decision.action === "wait" && prev) {
+        prev.ts = now;
+        prev.fillPct = fillPct;
+      } else if (decision.action === "skip") {
+        if (decision.reason.startsWith("confirm_dip")) {
+          block.cooldown.set(event.mint, now + TOKEN_COOLDOWN_SEC * 1000);
+          persistBlock();
+          log(`CONFIRM SKIP ${event.mint.slice(0, 12)}: ${decision.reason}`);
+        } else if (!noted.has(`${event.mint}:${decision.reason}`)) {
+          noted.add(`${event.mint}:${decision.reason}`);
+          log(`  skip ${event.mint.slice(0, 12)}: ${decision.reason}`);
         }
-        if (!positions.has(event.mint)) buyToken(event.mint, fillPct);
+        watchlist.delete(event.mint);
+      } else if (decision.action === "buy" && prev && !prev.decided && !positions.has(event.mint)) {
+        prev.decided = true;
+        const snapshot = {
+          virtualSolReserves: event.virtualSolReserves,
+          virtualTokenReserves: event.virtualTokenReserves,
+          realSolReserves: event.realSolReserves,
+          complete: false,
+        };
+        buyToken(event.mint, fillPct, snapshot);
       }
     } catch {}
     break;
@@ -396,6 +475,7 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
 setInterval(() => {
   for (const [mint] of positions) checkExit(mint);
 }, POLL_MS);
+setInterval(() => { retries.drain().catch((err) => log(`  retry error: ${err.message}`)); }, 1000);
 
 log("\nListening for near-graduation tokens...\n");
 
@@ -412,6 +492,7 @@ process.on("SIGINT", () => {
   log(`  PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
   log(`  Open positions: ${positions.size}`);
   persist();
+  persistBlock();
   ws.close();
   process.exit(0);
 });
