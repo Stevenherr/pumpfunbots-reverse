@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   collectRugSignals,
+  commonFunderPct,
   evaluateRug,
   loadThresholds,
   parseMintAuthorities,
@@ -47,6 +48,9 @@ test("defaults match the documented rug thresholds", () => {
     maxCreatorSignatures: 0,
     minRealSol: 0.4,
     failClosed: true,
+    maxSameSlotBuyers: 6,
+    maxCommonFunderPct: 0,
+    blockOnUnknown: false,
   });
   const custom = loadThresholds({
     RUG_REJECT_MINT_AUTHORITY: "0",
@@ -160,4 +164,75 @@ test("collectRugSignals uses injected readers and never a network", async () => 
   });
   assert.equal(evaluateRug(missing, thresholds).ok, false);
   assert.equal(missing.unavailable, "mint_account_missing");
+});
+
+test("unknown rug fields stay logged and only block when asked", () => {
+  const signals = cleanSignals({
+    devBuySharePct: null,
+    creatorLaunches: null,
+    creatorRugs: null,
+    sameSlotBuyers: null,
+  });
+  const open = evaluateRug(signals, loadThresholds({ RUG_BLOCK_ON_UNKNOWN: "0" }));
+  assert.equal(open.ok, true, open.reasons.join(" | "));
+  assert.ok(open.notes.includes("dev_buy_share_unknown"));
+  assert.ok(open.notes.includes("creator_launches_unknown"));
+  assert.ok(open.notes.includes("creator_rugs_unknown"));
+  assert.ok(open.notes.includes("same_slot_buyers_unknown"));
+  assert.ok(open.notes.includes("common_funder_off"));
+  const blocked = evaluateRug(signals, loadThresholds({ RUG_BLOCK_ON_UNKNOWN: "1" }));
+  assert.equal(blocked.ok, false);
+  assert.ok(blocked.reasons.some((reason) => reason === "unknown_blocks dev_buy_share_unknown"));
+});
+
+test("same-slot bundles and a repeated funder are thresholds", () => {
+  const bundled = evaluateRug(cleanSignals({ sameSlotBuyers: 9 }), thresholds);
+  assert.ok(bundled.reasons.some((reason) => reason.includes("bundled_same_slot 9 > 6")));
+  const fine = evaluateRug(cleanSignals({ sameSlotBuyers: 2 }), thresholds);
+  assert.equal(fine.ok, true, fine.reasons.join(" | "));
+  const funders = commonFunderPct([
+    { user: "a", funder: "pot" },
+    { user: "b", funder: "pot" },
+    { user: "c", funder: "other" },
+  ]);
+  assert.ok(Math.abs(funders - (200 / 3)) < 1e-9);
+  assert.equal(commonFunderPct([{ user: "a" }]), null);
+  const funded = evaluateRug(
+    cleanSignals({ commonFunderPct: 80 }),
+    loadThresholds({ RUG_MAX_COMMON_FUNDER_PCT: "50" }),
+  );
+  assert.ok(funded.reasons.some((reason) => reason.startsWith("common_funder_pct")));
+});
+
+test("dev share and creator history fill from data the bot already has", async () => {
+  const signals = await collectRugSignals({
+    mint: "Mint",
+    creator: "Creator",
+    creatorAta: "CREATOR_ATA",
+    devBuyTokensRaw: null,
+    creatorLaunches: null,
+    creatorRugs: null,
+  }, {
+    getMintAccount: async () => mintAccount({ supply: 1_000_000n }),
+    getLargestAccounts: async () => [{ address: "CREATOR_ATA", amount: "100000" }],
+    readCreatorStats: async () => ({ launches: 2, rugs: 1 }),
+  });
+  assert.equal(signals.devBuySharePct, 10);
+  assert.equal(signals.creatorLaunches, 2);
+  assert.equal(signals.creatorRugs, 1);
+  const stillUnknown = await collectRugSignals({
+    mint: "Mint",
+    creator: "Creator",
+    creatorAta: "MISSING",
+    devBuyTokensRaw: null,
+    creatorLaunches: null,
+    creatorRugs: null,
+  }, {
+    getMintAccount: async () => mintAccount({ supply: 1_000_000n }),
+    getLargestAccounts: async () => [{ address: "OTHER", amount: "100000" }],
+    readCreatorStats: async () => null,
+  });
+  assert.equal(stillUnknown.devBuySharePct, null);
+  assert.equal(stillUnknown.creatorLaunches, null);
+  assert.equal(stillUnknown.creatorRugs, null);
 });

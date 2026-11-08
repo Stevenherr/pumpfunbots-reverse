@@ -8,14 +8,11 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PublicKey } from "@solana/web3.js";
-import {
-  PUMP_PROGRAM,
-  TRADE_EVENT_PREFIX,
-  BUY_INSTRUCTIONS,
-  SELL_INSTRUCTIONS,
-  CREATE_INSTRUCTIONS,
-} from "../../lib/constants.mjs";
+import { PUMP_PROGRAM } from "../../lib/constants.mjs";
+import { ROOT } from "../../lib/config.mjs";
+import { eventsFromLogs } from "../../lib/market-events.mjs";
+import { paperSnapshot, readOpenPositions } from "../../lib/paper-book.mjs";
+import { readTrades, summarize, tradeLogFile } from "../../lib/trade-log.mjs";
 import { SolanaWs } from "../../lib/ws.mjs";
 import { handleApprovalHttp } from "../../lib/approval-http.mjs";
 
@@ -30,6 +27,7 @@ const stats = {
   totalBuys: 0,
   totalSells: 0,
   totalVolumeSol: 0,
+  flaggedTrades: 0,
   recentTokens: [],    // last 50 creates
   topBuyers: new Map(), // user → { count, volume }
   tokenVolume: new Map(), // mint → volume SOL
@@ -47,52 +45,15 @@ function flushMinute() {
 }
 setInterval(flushMinute, 60_000);
 
-function parseV3TradeEvent(data) {
-  if (data.length < 89) return null;
-  const mint = new PublicKey(data.subarray(8, 40)).toBase58();
-  const solAmount = Number(data.readBigUInt64LE(40)) / 1e9;
-  const tokenAmount = Number(data.readBigUInt64LE(48)) / 1e6;
-  const user = new PublicKey(data.subarray(57, 89)).toBase58();
-  return { mint, solAmount, tokenAmount, user };
-}
-
 function parseLogEvents(logs) {
-  let isBuy = false, isSell = false, isCreate = false;
-  for (const line of logs) {
-    const m = line.match(/Instruction: (\w+)/);
-    if (!m) continue;
-    if (BUY_INSTRUCTIONS.has(m[1])) isBuy = true;
-    if (SELL_INSTRUCTIONS.has(m[1])) isSell = true;
-    if (CREATE_INSTRUCTIONS.has(m[1])) isCreate = true;
-  }
-
-  const events = [];
-  for (const line of logs) {
-    if (!line.startsWith("Program data: ")) continue;
-    const raw = Buffer.from(line.slice(14), "base64");
-    if (raw.length < 8 || !raw.subarray(0, 8).equals(TRADE_EVENT_PREFIX)) continue;
-
-    try {
-      const parsed = parseV3TradeEvent(raw);
-      if (!parsed) continue;
-
-      if (isCreate) {
-        events.push({ type: "create", mint: parsed.mint, creator: parsed.user, ts: Date.now() });
-      }
-      events.push({
-        type: "trade",
-        mint: parsed.mint,
-        solAmount: parsed.solAmount,
-        isBuy: isBuy && !isSell,
-        user: parsed.user,
-      });
-    } catch {}
-  }
-  return events;
+  return eventsFromLogs(logs);
 }
 
-function processEvents(events) {
+function processEvents(parsed) {
+  const events = parsed?.events || parsed || [];
+  stats.flaggedTrades += parsed?.flagged || 0;
   for (const ev of events) {
+    if (ev.type === "flagged") continue;
     if (ev.type === "create") {
       stats.totalCreates++;
       currentMinute.creates++;
@@ -172,6 +133,7 @@ function getApiResponse() {
     buys: stats.totalBuys,
     sells: stats.totalSells,
     volume: stats.totalVolumeSol.toFixed(2),
+    flagged: stats.flaggedTrades,
     createsPerMin: stats.minuteData.length
       ? (stats.minuteData.reduce((s, m) => s + m.creates, 0) / stats.minuteData.length).toFixed(1)
       : "0",
@@ -190,6 +152,15 @@ const server = http.createServer((req, res) => {
   if (req.url === "/api/stats") {
     res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
     res.end(JSON.stringify(getApiResponse()));
+  } else if (req.url === "/api/report" || req.url === "/api/positions") {
+    const trades = readTrades(tradeLogFile(ROOT));
+    const summary = summarize(trades);
+    const open = readOpenPositions(path.join(ROOT, "data", "positions"));
+    const body = req.url === "/api/positions"
+      ? { open }
+      : { summary, paper: paperSnapshot(summary, open) };
+    res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+    res.end(JSON.stringify(body));
   } else if (req.url === "/" || req.url === "/dashboard.html") {
     const html = fs.readFileSync(path.join(__dirname, "dashboard.html"), "utf8");
     res.writeHead(200, { "Content-Type": "text/html" });

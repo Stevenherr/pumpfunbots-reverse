@@ -10,6 +10,9 @@ import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { defaultApprovalFile, listForBot } from "../../lib/approval.mjs";
 import { runGuardedBuy } from "../../lib/buy-gate.mjs";
 import { ROOT, SLIPPAGE_BPS } from "../../lib/config.mjs";
+import { loadExitConfig, planExit } from "../../lib/exit-plan.mjs";
+import { sizeForImpact } from "../../lib/sizing.mjs";
+import { appendTrade, tradeLogFile } from "../../lib/trade-log.mjs";
 import {
   PUMP_PROGRAM,
   TOKEN_2022_PROGRAM,
@@ -20,9 +23,7 @@ import {
   DEFAULT_STOP_RATIO,
   earlyStopMargin,
   effectiveStopRatio,
-  evaluateExit,
   staleExitMark,
-  timeoutDue,
   fillPriceSolPerToken,
   loadPositions,
   positionFile,
@@ -34,6 +35,7 @@ import {
   calcBuyTokens,
   calcSellSol,
   expectedSellPrice,
+  exitImpactOfBuy,
   getBondingCurveState,
   sellIx,
 } from "../../lib/pumpfun.mjs";
@@ -52,6 +54,10 @@ import { loadKeypair } from "../../lib/wallet.mjs";
 import { SolanaWs } from "../../lib/ws.mjs";
 
 const BUY_SOL = Number(process.env.GRAD_BUY_SOL || 0.1);
+const MIN_BUY_SOL = Number(process.env.MIN_BUY_SOL || 0.02);
+const MAX_EXIT_IMPACT_PCT = Number(process.env.MAX_EXIT_IMPACT_PCT || 5);
+const exitConfig = loadExitConfig();
+const tradesPath = tradeLogFile(ROOT);
 const MIN_FILL_PCT = Number(process.env.GRAD_MIN_FILL_PCT || 92);
 const TAKE_PROFIT = Number(process.env.GRAD_TAKE_PROFIT || 1.5);
 const STOP_LOSS = stopRatio(process.env.GRAD_STOP_LOSS, DEFAULT_STOP_RATIO);
@@ -94,6 +100,30 @@ function log(msg) {
   console.log(`[${new Date().toISOString().slice(11, 19)}] ${msg}`);
 }
 
+function journal(row) {
+  try {
+    appendTrade(tradesPath, row);
+  } catch (err) {
+    log(`  trade log: ${err.message}`);
+  }
+}
+
+function exitKind(reason) {
+  const text = String(reason);
+  if (text.startsWith("stop-loss")) return "stop_loss";
+  if (text.startsWith("partial-tp")) return "partial_take_profit";
+  if (text.startsWith("trail-stop")) return "trailing_stop";
+  if (text.startsWith("take-profit")) return "take_profit";
+  if (text.startsWith("timeout")) return "timeout";
+  return text.split(" ")[0] || "exit";
+}
+
+function keepTokens(tokens, keepFrac) {
+  if (tokens == null) return tokens;
+  const bps = BigInt(Math.max(0, Math.round(keepFrac * 1_000_000)));
+  return ((BigInt(tokens) * bps) / 1_000_000n).toString();
+}
+
 function persist() {
   savePositions(positionPath, positions);
 }
@@ -123,16 +153,27 @@ function getFillPct(virtualSolReserves) {
   return (Number(virtualSolReserves) / Number(VIRTUAL_SOL_AT_GRADUATION)) * 100;
 }
 
-function quoteFill(state, decimals) {
-  const tokens = calcBuyTokens(state, BUY_SOL);
+function quoteFill(state, decimals, solIn = BUY_SOL) {
+  const tokens = calcBuyTokens(state, solIn);
   return {
     tokens,
-    fillPrice: fillPriceSolPerToken(BUY_SOL, tokens, decimals),
+    solIn,
+    fillPrice: fillPriceSolPerToken(solIn, tokens, decimals),
     entrySpot: spotSolPerToken(state.virtualSolReserves, state.virtualTokenReserves, decimals),
   };
 }
 
-async function paperBuy(mint, fillPct, decimals, snapshot) {
+function sizedBuy(snapshot) {
+  if (!snapshot?.virtualSolReserves || !snapshot?.virtualTokenReserves) {
+    return { sol: BUY_SOL, skip: false, impactPct: null };
+  }
+  return sizeForImpact(
+    (sol) => exitImpactOfBuy(snapshot, sol)?.spotGapPct,
+    { maxSol: BUY_SOL, minSol: Math.min(MIN_BUY_SOL, BUY_SOL), maxImpactPct: MAX_EXIT_IMPACT_PCT },
+  );
+}
+
+async function paperBuy(mint, fillPct, decimals, snapshot, solIn = BUY_SOL) {
   const state = snapshot?.virtualSolReserves
     ? snapshot
     : await getBondingCurveState(new PublicKey(mint));
@@ -140,12 +181,16 @@ async function paperBuy(mint, fillPct, decimals, snapshot) {
     log(`  bonding curve already complete or unavailable`);
     return;
   }
-  const quote = quoteFill(state, decimals);
+  const quote = quoteFill(state, decimals, solIn);
   positions.set(mint, {
     tokens: quote.tokens.toString(),
     fillPrice: quote.fillPrice,
     entrySpot: quote.entrySpot,
-    solIn: BUY_SOL,
+    solIn,
+    remainingFrac: 1,
+    partialDone: false,
+    peakRatio: 1,
+    entryLiquiditySol: snapshot?.realSolReserves == null ? null : Number(snapshot.realSolReserves) / 1e9,
     entryTime: Date.now(),
     fillAtEntry: fillPct,
     decimals,
@@ -154,7 +199,7 @@ async function paperBuy(mint, fillPct, decimals, snapshot) {
   log(`  [DRY RUN] position tracked, fill ${quote.fillPrice.toExponential(6)} SOL/token`);
 }
 
-async function signBuy(mint, fillPct) {
+async function signBuy(mint, fillPct, solIn = BUY_SOL) {
   if (DRY_RUN) throw new Error("dry-run refused to sign");
   if (positions.has(mint)) throw new Error("position already open");
   const signals = await collectChainRugSignals({ mint });
@@ -165,11 +210,11 @@ async function signBuy(mint, fillPct) {
   const state = await getBondingCurveState(mintPk);
   if (!state || state.complete) throw new Error("bonding curve unavailable");
   const decimals = signals.decimals || 6;
-  const quote = quoteFill(state, decimals);
+  const quote = quoteFill(state, decimals, solIn);
   const minTokens = (quote.tokens * BigInt(10000 - SLIPPAGE_BPS)) / 10000n;
   const ixs = [
     ...computeBudgetIxs(),
-    buyIx(wallet.publicKey, mintPk, BUY_SOL, minTokens),
+    buyIx(wallet.publicKey, mintPk, solIn, minTokens),
     jitoTipIx(wallet.publicKey),
   ];
   const tx = await buildVersionedTx(wallet, ixs);
@@ -183,7 +228,7 @@ async function signBuy(mint, fillPct) {
     const actual = BigInt(info.value.amount);
     if (actual > 0n) {
       tokens = actual;
-      const priced = fillPriceSolPerToken(BUY_SOL, actual, decimals);
+      const priced = fillPriceSolPerToken(solIn, actual, decimals);
       if (priced) fill = priced;
     }
   } catch (err) {
@@ -193,7 +238,10 @@ async function signBuy(mint, fillPct) {
     tokens: tokens.toString(),
     fillPrice: fill,
     entrySpot: quote.entrySpot,
-    solIn: BUY_SOL,
+    solIn,
+    remainingFrac: 1,
+    partialDone: false,
+    peakRatio: 1,
     entryTime: Date.now(),
     fillAtEntry: fillPct,
     decimals,
@@ -225,15 +273,30 @@ async function buyToken(mint, fillPct, snapshot, opts = {}) {
   }
   inflight.add(mint);
   try {
+    const sized = sizedBuy(snapshot);
+    const realSol = snapshot?.realSolReserves == null ? null : Number(snapshot.realSolReserves) / 1e9;
+    if (sized.skip) {
+      releaseHold(holdPath, "graduation-sniper", mint);
+      log(`  skip ${mint.slice(0, 12)}: exit impact ${(sized.impactPct ?? 0).toFixed(2)}% at ${sized.sol.toFixed(4)} SOL > ${MAX_EXIT_IMPACT_PCT}%`);
+      journal({
+        event: "skip",
+        bot: "graduation-sniper",
+        mint,
+        skipReason: "min_buy_still_exceeds_impact",
+        entryLiquiditySol: realSol,
+        sizeSol: sized.sol,
+      });
+      return;
+    }
+    const buySol = sized.sol;
     log(`*** PRE-GRADUATION BUY ***`);
     log(`  mint: ${mint}`);
-    log(`  fill: ${fillPct.toFixed(1)}% | buying ${BUY_SOL} SOL`);
-    const realSol = snapshot?.realSolReserves == null ? null : Number(snapshot.realSolReserves) / 1e9;
+    log(`  fill: ${fillPct.toFixed(1)}% | buying ${buySol.toFixed(4)} SOL`);
     const signals = await collectChainRugSignals({ mint, realSol });
     const gated = await runGuardedBuy({
       bot: "graduation-sniper",
       mint,
-      amountSol: BUY_SOL,
+      amountSol: buySol,
       reason: `graduation fill ${fillPct.toFixed(1)}%`,
       dryRun: DRY_RUN,
       autoBuy: AUTO_BUY,
@@ -241,10 +304,10 @@ async function buyToken(mint, fillPct, snapshot, opts = {}) {
       thresholds,
       approvalFile,
       ttlSec: APPROVAL_TTL,
-      meta: { fillPct, decimals: signals.decimals || 6 },
+      meta: { fillPct, decimals: signals.decimals || 6, solIn: buySol },
       log,
-      onPaper: () => paperBuy(mint, fillPct, signals.decimals || 6, snapshot),
-      sign: () => signBuy(mint, fillPct),
+      onPaper: () => paperBuy(mint, fillPct, signals.decimals || 6, snapshot, buySol),
+      sign: () => signBuy(mint, fillPct, buySol),
     });
     if (gated.deferred) {
       releaseHold(holdPath, "graduation-sniper", mint);
@@ -265,36 +328,62 @@ async function buyToken(mint, fillPct, snapshot, opts = {}) {
   }
 }
 
-async function sellPosition(mint, reason, pnlMult) {
+async function sellPosition(mint, reason, pnlMult, sellPct = 100) {
   if (exiting.has(mint)) return;
   const pos = positions.get(mint);
   if (!pos) return;
   exiting.add(mint);
   const mintPk = new PublicKey(mint);
+  const frac = Math.min(100, Math.max(1, Number(sellPct) || 100)) / 100;
+  const partial = frac < 0.999;
+  const basis = Number(pos.solIn || BUY_SOL) * (pos.remainingFrac ?? 1);
   const pnlPct = ((pnlMult - 1) * 100);
-  const pnlSol = BUY_SOL * (pnlMult - 1);
+  const pnlSol = basis * frac * (pnlMult - 1);
   log(`  ${mint.slice(0, 12)}: ${reason}`);
   try {
-    if (String(reason).startsWith("stop-loss") && NO_REENTRY) {
+    if (!partial && String(reason).startsWith("stop-loss") && NO_REENTRY) {
       block.stopped.add(mint);
       persistBlock();
     }
-    releaseHold(holdPath, "graduation-sniper", mint);
-    unwatchMint(mint);
+    if (!partial) {
+      releaseHold(holdPath, "graduation-sniper", mint);
+      unwatchMint(mint);
+    }
     if (DRY_RUN) {
-      totalTrades++;
       totalPnl += pnlSol;
-      if (pnlMult > 1) wins++;
-      log(`  [DRY RUN] sold: ${pnlMult >= 1 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
-      log(`  session: ${wins}W/${totalTrades - wins}L, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
-      positions.delete(mint);
+      journal({
+        event: partial ? "partial" : "close",
+        bot: "graduation-sniper",
+        mint,
+        entryLiquiditySol: pos.entryLiquiditySol ?? null,
+        sizeSol: basis * frac,
+        exitType: partial ? "partial_take_profit" : exitKind(reason),
+        expectedFill: pos.lastExpected ?? null,
+        simulatedFill: pos.fillPrice > 0 ? pos.fillPrice * pnlMult : null,
+        pnlSol,
+      });
+      if (!partial) {
+        totalTrades++;
+        if (pnlMult > 1) wins++;
+        log(`  [DRY RUN] sold: ${pnlMult >= 1 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
+        log(`  session: ${wins}W/${totalTrades - wins}L, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
+        positions.delete(mint);
+      } else {
+        pos.partialDone = true;
+        pos.remainingFrac = (pos.remainingFrac ?? 1) * (1 - frac);
+        pos.tokens = keepTokens(pos.tokens, 1 - frac);
+        log(`  [DRY RUN] partial ${Math.round(frac * 100)}%: ${pnlMult >= 1 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
+      }
       persist();
       return;
     }
 
     const ata = getAssociatedTokenAddressSync(mintPk, wallet.publicKey, false, TOKEN_2022_PROGRAM);
     const info = await connection.getTokenAccountBalance(ata);
-    const total = BigInt(info.value.amount);
+    const walletTokens = BigInt(info.value.amount);
+    const total = partial
+      ? (walletTokens * BigInt(Math.round(frac * 1_000_000))) / 1_000_000n
+      : walletTokens;
     if (total === 0n) {
       positions.delete(mint);
       persist();
@@ -316,8 +405,27 @@ async function sellPosition(mint, reason, pnlMult) {
     ];
     const tx = await buildVersionedTx(wallet, ixs);
     await sendTxWithRetry(tx, { skipPreflight: true });
-    totalTrades++;
     totalPnl += pnlSol;
+    journal({
+      event: partial ? "partial" : "close",
+      bot: "graduation-sniper",
+      mint,
+      entryLiquiditySol: pos.entryLiquiditySol ?? null,
+      sizeSol: basis * frac,
+      exitType: partial ? "partial_take_profit" : exitKind(reason),
+      expectedFill: Number(expectedSol) / 1e9,
+      simulatedFill: pos.fillPrice > 0 ? pos.fillPrice * pnlMult : null,
+      pnlSol,
+    });
+    if (partial) {
+      pos.partialDone = true;
+      pos.remainingFrac = (pos.remainingFrac ?? 1) * (1 - frac);
+      pos.tokens = keepTokens(pos.tokens, 1 - frac);
+      persist();
+      log(`  sold ${Math.round(frac * 100)}%: ${pnlMult >= 1 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
+      return;
+    }
+    totalTrades++;
     if (pnlMult > 1) wins++;
     log(`  sold: ${pnlMult >= 1 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
     log(`  session: ${wins}W/${totalTrades - wins}L, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
@@ -351,30 +459,20 @@ async function checkExit(mint) {
       return;
     }
     const mark = spotSolPerToken(state.virtualSolReserves, state.virtualTokenReserves, pos.decimals || 6);
-    const expected = pos.tokens
-      ? expectedSellPrice(state, pos.tokens, pos.decimals || 6)
-      : null;
-    const decision = evaluateExit({
-      mark,
-      expectedFill: expected,
-      fillPrice: pos.fillPrice,
-      entryTime: pos.entryTime,
-      stopRatio: STOP_TRIGGER,
-      takeProfitRatio: TAKE_PROFIT,
-      timeoutSec: TIMEOUT_SEC,
-    });
-    if (decision.action === "sell" && decision.kind !== "timeout" && Number.isFinite(decision.ratio)) {
-      await sellPosition(mint, decision.reason, decision.ratio);
+    noteMark(mint, state.virtualSolReserves, state.virtualTokenReserves, mark);
+    if (mark > 0) {
+      pos.lastMark = mark;
+      pos.lastMarkAt = Date.now();
     }
   } catch (err) {
     log(`  WARN ${mint.slice(0, 12)}: price poll failed, timeout clock still running: ${err.message}`);
   }
 }
 
-function noteMark(mint, virtualSol, virtualToken) {
+function noteMark(mint, virtualSol, virtualToken, knownMark = null) {
   const pos = positions.get(mint);
   if (!pos) return;
-  const mark = spotSolPerToken(virtualSol, virtualToken, pos.decimals || 6);
+  const mark = knownMark > 0 ? knownMark : spotSolPerToken(virtualSol, virtualToken, pos.decimals || 6);
   if (mark > 0) {
     pos.lastMark = mark;
     pos.lastMarkAt = Date.now();
@@ -382,30 +480,49 @@ function noteMark(mint, virtualSol, virtualToken) {
   const expected = pos.tokens
     ? expectedSellPrice({ virtualSolReserves: virtualSol, virtualTokenReserves: virtualToken }, pos.tokens, pos.decimals || 6)
     : null;
-  const decision = evaluateExit({
-    mark,
-    expectedFill: expected,
-    fillPrice: pos.fillPrice,
+  if (expected > 0) pos.lastExpected = expected;
+  const ratio = expected > 0 && pos.fillPrice > 0 ? expected / pos.fillPrice : (mark > 0 && pos.fillPrice > 0 ? mark / pos.fillPrice : null);
+  const decision = planExit({
+    ratio,
+    now: Date.now(),
     entryTime: pos.entryTime,
     stopRatio: STOP_TRIGGER,
-    takeProfitRatio: TAKE_PROFIT,
+    fullTpX: TAKE_PROFIT,
     timeoutSec: TIMEOUT_SEC,
+    partialDone: Boolean(pos.partialDone),
+    peakRatio: pos.peakRatio ?? 1,
+    ...exitConfig,
   });
-  if (decision.action === "sell" && decision.kind !== "timeout" && Number.isFinite(decision.ratio)) {
-    sellPosition(mint, decision.reason, decision.ratio);
+  pos.peakRatio = decision.peakRatio;
+  if (decision.action === "sell" && decision.kind !== "timeout" && ratio != null) {
+    sellPosition(mint, decision.reason, ratio, decision.sellPct);
   }
 }
 
 function sweepTimeouts() {
   const now = Date.now();
   for (const [mint, pos] of [...positions]) {
-    if (!timeoutDue(pos.entryTime, now, TIMEOUT_SEC)) continue;
+    const price = pos.lastExpected > 0 ? pos.lastExpected : pos.lastMark;
+    const ratio = price > 0 && pos.fillPrice > 0 ? price / pos.fillPrice : null;
+    const decision = planExit({
+      ratio,
+      now,
+      entryTime: pos.entryTime,
+      stopRatio: STOP_TRIGGER,
+      fullTpX: TAKE_PROFIT,
+      timeoutSec: TIMEOUT_SEC,
+      partialDone: Boolean(pos.partialDone),
+      peakRatio: pos.peakRatio ?? 1,
+      ...exitConfig,
+    });
+    pos.peakRatio = decision.peakRatio;
+    if (decision.action !== "sell" || decision.kind !== "timeout") continue;
     const held = ((now - pos.entryTime) / 1000).toFixed(0);
-    const { price, source } = staleExitMark(pos);
-    const ratio = pos.fillPrice > 0 && price > 0 ? price / pos.fillPrice : 1;
+    const { source } = staleExitMark(pos);
     const fresh = source === "last" && pos.lastMarkAt && now - pos.lastMarkAt <= 5000;
     if (!fresh) log(`  WARN ${mint.slice(0, 12)}: timeout ${held}s using ${source} price, no fresh mark`);
-    sellPosition(mint, `timeout ${held}s`, ratio);
+    const exitRatio = ratio != null ? ratio : 1;
+    sellPosition(mint, decision.reason, exitRatio, decision.sellPct);
   }
 }
 

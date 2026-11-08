@@ -36,6 +36,8 @@ Die Graduation-Regel armt den ersten Print nur. Ein Dip über 2 % in 8 Sekunden 
 
 Der Sniper kauft nur eine frische Curve (höchstens 12 SOL real) und denselben Mint kein zweites Mal. Ein spätes Preisupdate bei 0,71 verkauft schlechter als ein schneller Trigger bei 0,97 (Stop 0,94 plus 0,03 Marge).
 
+Die Kampagne verkauft Gewinner nicht mehr komplett bei 2,0. Ein Pfad, der 1,3 überschreitet, verkauft zuerst die Hälfte und den Rest erst beim höheren Quote oder am Trailing-Stop 8 % unter dem Peak. Ein zusätzlicher Trade endet am Trailing-Stop. Eine dünne Curve kauft weniger als 0,05 SOL, damit der Exit-Abstand unter 5 % bleibt. Ein noch dünnerer Pool wird gar nicht gekauft, weil schon 0,02 SOL darüber liegt. Ein Slot mit 9 Käufern wird als Bundle abgelehnt. Das Einstiegsfenster überspringt zu wenige Käufer, ein schlechtes Buy/Sell-Verhältnis und einen Kurs, der vor dem Einstieg schon über 1,8 liegt. Die Endsumme ist deshalb eine andere als in den früheren Kampagnen.
+
 ```bash
 python3 simulation/safety_campaign.py
 python3 simulation/test_harness.py -v
