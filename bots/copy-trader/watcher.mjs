@@ -19,6 +19,8 @@ import {
 } from "../../lib/constants.mjs";
 import {
   DEFAULT_STOP_RATIO,
+  earlyStopMargin,
+  effectiveStopRatio,
   evaluateExit,
   fillPriceSolPerToken,
   loadPositions,
@@ -36,7 +38,9 @@ import {
 import { collectChainRugSignals } from "../../lib/rugcheck-chain.mjs";
 import { evaluateRug, loadThresholds } from "../../lib/rugcheck.mjs";
 import { connection, sendTxWithRetry } from "../../lib/rpc.mjs";
+import { claimHold, heldByOther, heldMintsFile, releaseHold } from "../../lib/held-mints.mjs";
 import { positionPollMs } from "../../lib/rpc-budget.mjs";
+import { nextHeldMint } from "../../lib/sniper-entry.mjs";
 import { approvalTtlSec, autoBuyFlag, dryRunFlag, stopRatio } from "../../lib/runtime-flags.mjs";
 import { forEachTradeMark } from "../../lib/trade-event.mjs";
 import { buildVersionedTx, computeBudgetIxs, jitoTipIx } from "../../lib/tx.mjs";
@@ -47,6 +51,7 @@ const BUY_SOL = Number(process.env.COPY_BUY_SOL || 0.05);
 const SELL_PCT = Number(process.env.COPY_SELL_PCT || 100);
 const MAX_POSITIONS = Number(process.env.COPY_MAX_POSITIONS || 5);
 const STOP_LOSS = stopRatio(process.env.COPY_STOP_LOSS, DEFAULT_STOP_RATIO);
+const STOP_TRIGGER = effectiveStopRatio(STOP_LOSS, earlyStopMargin());
 const TARGETS = (process.env.COPY_TARGETS || "").split(",").map((item) => item.trim()).filter(Boolean);
 const POLL_MS = positionPollMs();
 const DRY_RUN = dryRunFlag();
@@ -55,6 +60,10 @@ const APPROVAL_TTL = approvalTtlSec();
 const thresholds = loadThresholds();
 const approvalFile = defaultApprovalFile();
 const positionPath = positionFile(ROOT, "copy-trader");
+const holdPath = heldMintsFile(ROOT);
+const mintSubs = new Map();
+let pollCursor = 0;
+let ws;
 
 let totalPnl = 0;
 let totalTrades = 0;
@@ -76,6 +85,37 @@ function log(msg) {
 
 function persist() {
   savePositions(positionPath, positions);
+}
+
+function watchMint(mint) {
+  if (!ws || mintSubs.has(mint)) return;
+  const id = ws.subscribeLogs(mint, (result) => {
+    const logs = result?.value?.logs;
+    if (!logs || !positions.has(mint)) return;
+    forEachTradeMark(logs, (mark) => {
+      if (mark.mint === mint) noteMark(mark.mint, mark.virtualSolReserves, mark.virtualTokenReserves);
+    });
+  });
+  mintSubs.set(mint, id);
+}
+
+function unwatchMint(mint) {
+  const id = mintSubs.get(mint);
+  if (id == null) return;
+  ws?.unsubscribe(id);
+  mintSubs.delete(mint);
+}
+
+function dropMint(mint) {
+  positions.delete(mint);
+  persist();
+  releaseHold(holdPath, "copy-trader", mint);
+  unwatchMint(mint);
+}
+
+function trackOpen(mint) {
+  claimHold(holdPath, "copy-trader", mint);
+  watchMint(mint);
 }
 
 function parseV3TradeEvent(data) {
@@ -133,6 +173,7 @@ async function paperBuy(mint, copiedFrom, decimals) {
     decimals,
   });
   persist();
+  trackOpen(mint);
   log(`  [DRY RUN] tracked, fill ${quote.fillPrice.toExponential(6)} SOL/token`);
 }
 
@@ -181,12 +222,17 @@ async function signBuy(mint, copiedFrom) {
     decimals,
   });
   persist();
+  trackOpen(mint);
   log(`  copied, fill ${fill.toExponential(6)} SOL/token`);
 }
 
 async function copyBuy(mint, copiedFrom) {
   if (positions.size + inflight.size >= MAX_POSITIONS) return;
   if (positions.has(mint) || inflight.has(mint)) return;
+  if (heldByOther(holdPath, "copy-trader", mint)) {
+    log(`  skip ${mint.slice(0, 8)}: held by another bot`);
+    return;
+  }
   inflight.add(mint);
   try {
     log(`COPY BUY from ${copiedFrom.slice(0, 8)}...`);
@@ -228,11 +274,13 @@ async function copySell(mint, copiedFrom, reason = "copy sell", pct = SELL_PCT) 
       if (state && pos.fillPrice > 0) {
         const sellPrice = spotSolPerToken(state.virtualSolReserves, state.virtualTokenReserves, pos.decimals || 6);
         const pnlPct = ((sellPrice / pos.fillPrice) - 1) * 100;
+        const pnlSol = BUY_SOL * (pnlPct / 100);
+        totalPnl += pnlSol;
         totalTrades++;
-        log(`  [DRY RUN] would sell: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%`);
+        log(`  [DRY RUN] would sell: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
+        log(`  session: ${totalTrades} trades, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
       }
-      positions.delete(mint);
-      persist();
+      dropMint(mint);
       return;
     }
 
@@ -240,16 +288,14 @@ async function copySell(mint, copiedFrom, reason = "copy sell", pct = SELL_PCT) 
     const info = await connection.getTokenAccountBalance(ata);
     const total = BigInt(info.value.amount);
     if (total === 0n) {
-      positions.delete(mint);
-      persist();
+      dropMint(mint);
       return;
     }
     const sellAmount = pct >= 100 ? total : (total * BigInt(pct)) / 100n;
     const state = await getBondingCurveState(mintPk);
     if (!state || state.complete) {
       log(`  bonding curve unavailable`);
-      positions.delete(mint);
-      persist();
+      dropMint(mint);
       return;
     }
     const expectedSol = calcSellSol(state, sellAmount);
@@ -269,10 +315,7 @@ async function copySell(mint, copiedFrom, reason = "copy sell", pct = SELL_PCT) 
     totalTrades++;
     log(`  sold: ${pnlPct > 0 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL)`);
     log(`  session: ${totalTrades} trades, PnL: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL`);
-    if (pct >= 100) {
-      positions.delete(mint);
-      persist();
-    }
+    if (pct >= 100) dropMint(mint);
   } catch (err) {
     log(`  copy sell failed: ${err.message}`);
   } finally {
@@ -288,20 +331,21 @@ function noteMark(mint, virtualSol, virtualToken) {
     mark,
     fillPrice: pos.fillPrice,
     entryTime: pos.entryTime,
-    stopRatio: STOP_LOSS,
+    stopRatio: STOP_TRIGGER,
   });
   if (decision.action === "sell") copySell(mint, pos.copiedFrom, decision.reason, 100);
 }
 
 async function checkPositions() {
-  for (const [mint, pos] of positions) {
-    try {
-      const state = await getBondingCurveState(new PublicKey(mint));
-      if (!state || state.complete) continue;
-      noteMark(mint, state.virtualSolReserves, state.virtualTokenReserves);
-    } catch (err) {
-      log(`  check error ${mint.slice(0, 8)}: ${err.message}`);
-    }
+  const next = nextHeldMint([...positions.keys()], pollCursor);
+  pollCursor = next.cursor;
+  if (!next.mint) return;
+  try {
+    const state = await getBondingCurveState(new PublicKey(next.mint));
+    if (!state || state.complete) return;
+    noteMark(next.mint, state.virtualSolReserves, state.virtualTokenReserves);
+  } catch (err) {
+    log(`  check error ${next.mint.slice(0, 8)}: ${err.message}`);
   }
 }
 
@@ -343,8 +387,12 @@ log(DRY_RUN
 if (positions.size) log(`Resumed ${positions.size} open position(s) from disk`);
 resumeQueuedBuys();
 
-const ws = new SolanaWs();
+ws = new SolanaWs();
 await ws.connect();
+for (const mint of positions.keys()) {
+  claimHold(holdPath, "copy-trader", mint);
+  watchMint(mint);
+}
 
 ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
   const { value } = result;
