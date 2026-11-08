@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import harness  # noqa: E402
+import safety_campaign  # noqa: E402
 
 D = Decimal
 
@@ -322,7 +323,16 @@ class SyntheticHarnessTests(unittest.TestCase):
     def test_sources_stay_offline_and_local(self) -> None:
         root = Path(__file__).resolve().parent
         allowed = {
-            "harness.py": {"__future__", "argparse", "json", "dataclasses", "decimal", "pathlib"},
+            "harness.py": {
+                "__future__",
+                "argparse",
+                "json",
+                "dataclasses",
+                "decimal",
+                "pathlib",
+                "safety_campaign",
+            },
+            "safety_campaign.py": {"__future__", "decimal", "harness"},
             "test_harness.py": {
                 "__future__",
                 "ast",
@@ -332,6 +342,7 @@ class SyntheticHarnessTests(unittest.TestCase):
                 "decimal",
                 "pathlib",
                 "harness",
+                "safety_campaign",
             },
         }
         for name, modules in allowed.items():
@@ -344,8 +355,7 @@ class SyntheticHarnessTests(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     found.add(node.module.split(".")[0])
             self.assertEqual(found, modules, name)
-        harness_text = (root / "harness.py").read_text(encoding="utf-8").lower()
-        for bit in (
+        forbidden = (
             "web3",
             "helius",
             "keypair",
@@ -356,8 +366,64 @@ class SyntheticHarnessTests(unittest.TestCase):
             "sendrawtransaction",
             "bots/",
             "lib/",
-        ):
-            self.assertNotIn(bit, harness_text, bit)
+        )
+        for name in ("harness.py", "safety_campaign.py"):
+            text = (root / name).read_text(encoding="utf-8").lower()
+            for bit in forbidden:
+                self.assertNotIn(bit, text, f"{name}:{bit}")
+
+
+class SafetyCampaignTests(unittest.TestCase):
+    def test_rug_approval_and_fill_stop_are_synthetic(self) -> None:
+        result = safety_campaign.run_campaign()
+        self.assertEqual(result["label"], "SYNTHETIC")
+        self.assertEqual(result["starting_balance_sol"], D("1.00"))
+        self.assertEqual(safety_campaign.STOP_RATIO, D("0.94"))
+        self.assertEqual(result["trades"], 6)
+        self.assertEqual(result["wins"], 3)
+        self.assertEqual(result["losses"], 3)
+        self.assertEqual(result["win_rate"], D("0.5"))
+        self.assertEqual(result["stop_loss_hits"], 2)
+        self.assertEqual(result["auto_buys"], 1)
+        self.assertEqual(result["human_buys"], 5)
+        self.assertEqual(result["auto_rejected"], ["AUTO_MINT"])
+        self.assertEqual(len(result["approval_rejected"]), 1)
+        self.assertEqual(result["approval_rejected"][0]["status"], "rejected")
+        self.assertEqual(result["approval_expired"][0]["status"], "expired")
+        self.assertGreater(result["fast_rug_pnl"], result["slow_rug_pnl"])
+        self.assertLess(result["fast_rug_pnl"], 0)
+        self.assertLess(result["slow_rug_pnl"], result["fast_rug_pnl"])
+        self.assertEqual(result["ending_balance_sol"], D("1.00") + result["pnl_sol"])
+
+        by_mint = {row["mint"]: row["reasons"] for row in result["rejected"]}
+        self.assertEqual(by_mint["MINTAUTH"], ["mint_authority_still_set"])
+        self.assertEqual(by_mint["FREEZEAUTH"], ["freeze_authority_still_set"])
+        self.assertIn("top_holder_pct 45.00 > 20.00", by_mint["WHALE"])
+        self.assertIn("dev_buy_share_pct 25.00 > 10.00", by_mint["DEVHEAVY"])
+        self.assertIn("creator_launches 6 > 3", by_mint["SERIAL"])
+        self.assertIn("creator_signatures 90 > 40", by_mint["BUSYDEV"])
+        self.assertIn("thin_liquidity_sol 0.0500 < 0.4000", by_mint["THIN"])
+        self.assertIn("mint_authority_still_set", by_mint["COMBO"])
+        self.assertIn("thin_liquidity_sol 0.0100 < 0.4000", by_mint["COMBO"])
+        self.assertNotIn("HUMAN_NO", by_mint)
+        self.assertNotIn("EXPIRED", by_mint)
+
+        rows = {row["mint"]: row for row in result["trade_rows"]}
+        self.assertEqual(rows["RUG_FAST"]["exit"], "stop_loss")
+        self.assertNotEqual(rows["RUG_FAST"]["exit"], "slow_poll_rug")
+        self.assertEqual(rows["STOP_NEAR"]["exit"], "stop_loss")
+        self.assertEqual(rows["AUTO_WIN"]["exit"], "take_profit")
+        self.assertEqual(rows["HUMAN_WIN"]["exit"], "take_profit")
+        self.assertEqual(rows["DIP_THEN_WIN"]["exit"], "take_profit")
+        self.assertEqual(rows["TIMEOUT_FADE"]["exit"], "timeout")
+        for mint in ("AUTO_WIN", "HUMAN_WIN", "DIP_THEN_WIN"):
+            self.assertGreater(rows[mint]["pnl"], 0)
+        for mint in ("STOP_NEAR", "RUG_FAST", "TIMEOUT_FADE"):
+            self.assertLess(rows[mint]["pnl"], 0)
+        self.assertTrue(all(row["sold"] for row in rows.values()))
+        text = safety_campaign.format_report(result)
+        self.assertIn("SYNTHETIC", text)
+        self.assertIn("Startguthaben: 1.00 SOL", text)
 
 
 if __name__ == "__main__":

@@ -587,6 +587,10 @@ def main() -> None:
     print("original bot JS was not executed")
     for line in scenario_report():
         print(f"{line.name}: {line.detail}")
+    from safety_campaign import format_report, run_campaign
+
+    print()
+    print(format_report(run_campaign()))
     print("pass/fail: run python3 simulation/test_harness.py -v")
 
 
