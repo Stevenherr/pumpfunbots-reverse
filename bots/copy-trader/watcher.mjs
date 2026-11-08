@@ -32,6 +32,7 @@ import {
   buyIx,
   calcBuyTokens,
   calcSellSol,
+  expectedSellPrice,
   getBondingCurveState,
   sellIx,
 } from "../../lib/pumpfun.mjs";
@@ -327,8 +328,12 @@ function noteMark(mint, virtualSol, virtualToken) {
   const pos = positions.get(mint);
   if (!pos) return;
   const mark = spotSolPerToken(virtualSol, virtualToken, pos.decimals || 6);
+  const expected = pos.tokens
+    ? expectedSellPrice({ virtualSolReserves: virtualSol, virtualTokenReserves: virtualToken }, pos.tokens, pos.decimals || 6)
+    : null;
   const decision = evaluateExit({
     mark,
+    expectedFill: expected,
     fillPrice: pos.fillPrice,
     entryTime: pos.entryTime,
     stopRatio: STOP_TRIGGER,
