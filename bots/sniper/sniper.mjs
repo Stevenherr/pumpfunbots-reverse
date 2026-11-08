@@ -10,6 +10,7 @@ import { PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { defaultApprovalFile, listForBot } from "../../lib/approval.mjs";
 import { runGuardedBuy } from "../../lib/buy-gate.mjs";
+import { historyFile, noteLaunch, noteRug } from "../../lib/creator-history.mjs";
 import { ROOT, SLIPPAGE_BPS } from "../../lib/config.mjs";
 import {
   PUMP_PROGRAM,
@@ -37,6 +38,8 @@ import {
 import { collectChainRugSignals } from "../../lib/rugcheck-chain.mjs";
 import { evaluateRug, loadThresholds } from "../../lib/rugcheck.mjs";
 import { connection, sendTxWithRetry } from "../../lib/rpc.mjs";
+import { positionPollMs } from "../../lib/rpc-budget.mjs";
+import { createRetryQueue } from "../../lib/retry-queue.mjs";
 import { approvalTtlSec, autoBuyFlag, dryRunFlag, stopRatio } from "../../lib/runtime-flags.mjs";
 import { forEachTradeMark } from "../../lib/trade-event.mjs";
 import { buildVersionedTx, computeBudgetIxs, jitoTipIx } from "../../lib/tx.mjs";
@@ -50,13 +53,15 @@ const TIMEOUT_SEC = Number(process.env.SNIPER_TIMEOUT_SEC || 120);
 const MAX_POSITIONS = Number(process.env.SNIPER_MAX_POSITIONS || 3);
 const MIN_DEV_BUY = Number(process.env.SNIPER_MIN_DEV_BUY || 0);
 const COOLDOWN_SEC = Number(process.env.SNIPER_COOLDOWN_SEC || 10);
-const POLL_MS = 400;
+const POLL_MS = positionPollMs();
 const DRY_RUN = dryRunFlag();
 const AUTO_BUY = autoBuyFlag();
 const APPROVAL_TTL = approvalTtlSec();
 const thresholds = loadThresholds();
 const approvalFile = defaultApprovalFile();
 const positionPath = positionFile(ROOT, "sniper");
+const creatorPath = historyFile(ROOT);
+const retries = createRetryQueue({ maxAttempts: 3 });
 
 let totalPnl = 0;
 let totalTrades = 0;
@@ -66,7 +71,6 @@ const wallet = loadKeypair();
 const positions = loadPositions(positionPath);
 const inflight = new Set();
 const exiting = new Set();
-const creatorLaunches = new Map();
 let lastBuyTime = 0;
 
 function log(msg) {
@@ -88,12 +92,13 @@ function parseV3TradeEvent(data) {
   const tokenAmountRaw = data.readBigUInt64LE(48);
   const tokenAmount = Number(tokenAmountRaw) / 1e6;
   const user = new PublicKey(data.subarray(57, 89)).toBase58();
-  let virtualSolReserves, virtualTokenReserves;
+  let virtualSolReserves, virtualTokenReserves, realSolReserves;
   if (data.length >= 113) {
     virtualSolReserves = data.readBigUInt64LE(97);
     virtualTokenReserves = data.readBigUInt64LE(105);
   }
-  return { mint, solAmount, tokenAmount, tokenAmountRaw, user, virtualSolReserves, virtualTokenReserves };
+  if (data.length >= 121) realSolReserves = data.readBigUInt64LE(113);
+  return { mint, solAmount, tokenAmount, tokenAmountRaw, user, virtualSolReserves, virtualTokenReserves, realSolReserves };
 }
 
 function parseLogEvents(logs) {
@@ -136,7 +141,7 @@ function remember(mint, pos) {
 }
 
 async function paperBuy(mint, context) {
-  const state = await getBondingCurveState(new PublicKey(mint));
+  const state = context.curve || await getBondingCurveState(new PublicKey(mint));
   if (!state || state.complete) {
     log(`  skip: bonding curve unavailable`);
     return;
@@ -149,6 +154,7 @@ async function paperBuy(mint, context) {
     solIn: BUY_SOL,
     entryTime: Date.now(),
     decimals: context.decimals || 6,
+    creator: context.creator || null,
   });
   log(`  [DRY RUN] would buy — position tracked, fill ${quote.fillPrice.toExponential(6)} SOL/token`);
 }
@@ -163,8 +169,11 @@ async function signBuy(mint, context = {}) {
     creator: context.creator || null,
     devBuyTokensRaw,
     creatorLaunches: context.creatorLaunches ?? null,
+    creatorRugs: context.creatorRugs ?? null,
+    realSol: context.curve?.realSolReserves == null ? null : Number(context.curve.realSolReserves) / 1e9,
   });
   const rug = evaluateRug(signals, thresholds);
+  if (rug.deferred) throw new Error(`rate limited before sign: ${rug.reasons.join(" | ")}`);
   if (!rug.ok) throw new Error(`rug rejected before sign: ${rug.reasons.join(" | ")}`);
 
   const mintPk = new PublicKey(mint);
@@ -205,40 +214,58 @@ async function signBuy(mint, context = {}) {
     solIn: BUY_SOL,
     entryTime: Date.now(),
     decimals,
+    creator: context.creator || null,
   });
   log(`  position opened, fill ${fill.toExponential(6)} SOL/token`);
 }
 
-async function considerCreate(create, devTrade) {
-  if (slotsUsed() >= MAX_POSITIONS) return;
-  if (Date.now() - lastBuyTime < COOLDOWN_SEC * 1000) return;
+function curveFromTrade(trade) {
+  if (!trade?.virtualSolReserves || !trade?.virtualTokenReserves) return null;
+  return {
+    virtualSolReserves: trade.virtualSolReserves,
+    virtualTokenReserves: trade.virtualTokenReserves,
+    realSolReserves: trade.realSolReserves,
+    complete: false,
+  };
+}
+
+async function considerCreate(create, devTrade, opts = {}) {
+  if (!opts.fromRetry) {
+    if (slotsUsed() >= MAX_POSITIONS) return;
+    if (Date.now() - lastBuyTime < COOLDOWN_SEC * 1000) return;
+  }
   if (positions.has(create.mint) || inflight.has(create.mint)) return;
   if (MIN_DEV_BUY && (!devTrade || devTrade.solAmount < MIN_DEV_BUY)) {
     log(`skip: dev buy ${devTrade?.solAmount?.toFixed(3) || 0} < ${MIN_DEV_BUY}`);
     return;
   }
 
-  lastBuyTime = Date.now();
+  if (!opts.fromRetry) lastBuyTime = Date.now();
   inflight.add(create.mint);
-  const launches = (creatorLaunches.get(create.creator) || 0) + 1;
-  creatorLaunches.set(create.creator, launches);
   const devBuyTokensRaw = devTrade?.tokenAmountRaw ?? null;
+  const stats = noteLaunch(creatorPath, create.creator, create.mint);
+  const curve = curveFromTrade(devTrade);
+  const realSol = devTrade?.realSolReserves == null ? null : Number(devTrade.realSolReserves) / 1e9;
   try {
     log(`\nSNIPING: ${create.mint}`);
-    log(`  creator: ${create.creator}`);
+    log(`  creator: ${create.creator} launches=${stats.launches} rugs=${stats.rugs}`);
     const signals = await collectChainRugSignals({
       mint: create.mint,
       creator: create.creator,
       devBuyTokensRaw,
-      creatorLaunches: launches,
+      creatorLaunches: stats.launches,
+      creatorRugs: stats.rugs,
+      realSol,
     });
     const meta = {
       creator: create.creator,
-      creatorLaunches: launches,
+      creatorLaunches: stats.launches,
+      creatorRugs: stats.rugs,
       devBuyTokensRaw: devBuyTokensRaw == null ? null : devBuyTokensRaw.toString(),
       decimals: signals.decimals || 6,
+      curve,
     };
-    await runGuardedBuy({
+    const gated = await runGuardedBuy({
       bot: "sniper",
       mint: create.mint,
       amountSol: BUY_SOL,
@@ -254,6 +281,10 @@ async function considerCreate(create, devTrade) {
       onPaper: () => paperBuy(create.mint, meta),
       sign: () => signBuy(create.mint, meta),
     });
+    if (gated.deferred) {
+      const queued = retries.push(create.mint, 2000, () => considerCreate(create, devTrade, { fromRetry: true }));
+      if (!queued) log(`  RUG DEFER give up ${create.mint}: still no chain data, not buying`);
+    }
   } catch (err) {
     log(`  buy failed: ${err.message}`);
   } finally {
@@ -261,7 +292,7 @@ async function considerCreate(create, devTrade) {
   }
 }
 
-async function executeSell(mint, reason) {
+async function executeSell(mint, reason, markHint) {
   if (exiting.has(mint)) return;
   const pos = positions.get(mint);
   if (!pos) return;
@@ -269,10 +300,14 @@ async function executeSell(mint, reason) {
   const mintPk = new PublicKey(mint);
   log(`  selling ${mint.slice(0, 8)}... (${reason})`);
   try {
+    if (String(reason).startsWith("stop-loss") && pos.creator) noteRug(creatorPath, pos.creator, mint);
     if (DRY_RUN) {
-      const state = await getBondingCurveState(mintPk);
-      if (state && pos.fillPrice > 0) {
-        const sellPrice = spotSolPerToken(state.virtualSolReserves, state.virtualTokenReserves, pos.decimals || 6);
+      let sellPrice = markHint;
+      if (!(sellPrice > 0)) {
+        const state = await getBondingCurveState(mintPk);
+        if (state) sellPrice = spotSolPerToken(state.virtualSolReserves, state.virtualTokenReserves, pos.decimals || 6);
+      }
+      if (sellPrice > 0 && pos.fillPrice > 0) {
         const pnlPct = ((sellPrice / pos.fillPrice) - 1) * 100;
         const holdSec = ((Date.now() - pos.entryTime) / 1000).toFixed(0);
         totalTrades++;
@@ -341,7 +376,7 @@ function noteMark(mint, virtualSol, virtualToken) {
     takeProfitRatio: TAKE_PROFIT,
     timeoutSec: TIMEOUT_SEC,
   });
-  if (decision.action === "sell") executeSell(mint, decision.reason);
+  if (decision.action === "sell") executeSell(mint, decision.reason, mark);
 }
 
 async function checkPositions() {
@@ -432,6 +467,7 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), async (result) => {
 });
 
 setInterval(checkPositions, POLL_MS);
+setInterval(() => { retries.drain().catch((err) => log(`  retry error: ${err.message}`)); }, 1000);
 log("\nListening for new tokens...\n");
 
 process.on("SIGINT", () => {
