@@ -27,6 +27,8 @@ import {
   earlyStopMargin,
   effectiveStopRatio,
   evaluateExit,
+  staleExitMark,
+  timeoutDue,
   fillPriceSolPerToken,
   loadPositions,
   positionFile,
@@ -447,6 +449,10 @@ function noteMark(mint, virtualSol, virtualToken) {
   const pos = positions.get(mint);
   if (!pos) return;
   const mark = spotSolPerToken(virtualSol, virtualToken, pos.decimals || 6);
+  if (mark > 0) {
+    pos.lastMark = mark;
+    pos.lastMarkAt = Date.now();
+  }
   const decision = evaluateExit({
     mark,
     fillPrice: pos.fillPrice,
@@ -477,11 +483,20 @@ async function checkPositions() {
       return;
     }
     noteMark(mint, state.virtualSolReserves, state.virtualTokenReserves);
-    if (!positions.has(mint)) return;
-    const held = (Date.now() - pos.entryTime) / 1000;
-    if (held >= TIMEOUT_SEC) await executeSell(mint, `timeout ${held.toFixed(0)}s`);
   } catch (err) {
-    log(`  check error ${mint.slice(0, 8)}: ${err.message}`);
+    log(`  WARN ${mint.slice(0, 8)}: price poll failed, timeout clock still running: ${err.message}`);
+  }
+}
+
+function sweepTimeouts() {
+  const now = Date.now();
+  for (const [mint, pos] of [...positions]) {
+    if (!timeoutDue(pos.entryTime, now, TIMEOUT_SEC)) continue;
+    const held = ((now - pos.entryTime) / 1000).toFixed(0);
+    const { price, source } = staleExitMark(pos);
+    const fresh = source === "last" && pos.lastMarkAt && now - pos.lastMarkAt <= 5000;
+    if (!fresh) log(`  WARN ${mint.slice(0, 8)}: timeout ${held}s using ${source} price, no fresh mark`);
+    executeSell(mint, `timeout ${held}s`, price);
   }
 }
 
@@ -575,6 +590,7 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), async (result) => {
 });
 
 setInterval(checkPositions, POLL_MS);
+setInterval(sweepTimeouts, 1000);
 setInterval(() => { retries.drain().catch((err) => log(`  retry error: ${err.message}`)); }, 1000);
 log("\nListening for new tokens...\n");
 

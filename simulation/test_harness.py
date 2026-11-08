@@ -403,6 +403,12 @@ class SafetyCampaignTests(unittest.TestCase):
         self.assertEqual(result["fast_watch_ratio"], D("0.97"))
         self.assertEqual(result["slow_watch_ratio"], D("0.71"))
         self.assertGreater(result["fast_watch_pnl"], result["slow_watch_pnl"])
+        quiet = result["quiet_timeout"]
+        self.assertEqual(quiet["timeout_s"], 120)
+        self.assertLess(quiet["still_open_before"], quiet["timeout_s"])
+        self.assertLessEqual(quiet["late_by_s"], 2)
+        self.assertGreaterEqual(quiet["late_by_s"], 0)
+        self.assertTrue(quiet["stale_price"])
         self.assertLess(result["slow_watch_pnl"], result["fast_watch_pnl"])
         self.assertEqual(result["auto_rejected"], ["AUTO_MINT"])
         self.assertEqual(len(result["approval_rejected"]), 1)

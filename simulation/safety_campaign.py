@@ -175,6 +175,18 @@ def sniper_launch(
     return "buy"
 
 
+def quiet_timeout(timeout_s: int = 120, sweep_s: int = 1) -> dict:
+    """No prices at all. The wall-clock sweep closes on the first tick at or after timeout."""
+    close_after = timeout_s + sweep_s
+    return {
+        "timeout_s": timeout_s,
+        "closed_after_s": close_after,
+        "late_by_s": close_after - timeout_s,
+        "stale_price": True,
+        "still_open_before": timeout_s - 1,
+    }
+
+
 def first_visible_stop(marks: list[Decimal], trigger: Decimal) -> Decimal:
     for mark in marks:
         if mark <= trigger:
@@ -402,6 +414,7 @@ def run_campaign() -> dict:
             first_visible_stop([D("1"), D("0.98"), D("0.97"), D("0.90"), D("0.71")], STOP_RATIO + D("0.03"))
         ),
         "slow_watch_pnl": one_stop(D("0.71")),
+        "quiet_timeout": quiet_timeout(),
     }
 
 
@@ -452,6 +465,12 @@ def format_report(result: dict) -> str:
             f"PnL {money(result['fast_watch_pnl'])} SOL; "
             f"nur spätes Update bei {result['slow_watch_ratio']} "
             f"PnL {money(result['slow_watch_pnl'])} SOL"
+        ),
+        (
+            "Timeout ohne Preisupdate: konfiguriert "
+            f"{result['quiet_timeout']['timeout_s']}s, geschlossen nach "
+            f"{result['quiet_timeout']['closed_after_s']}s "
+            f"(+{result['quiet_timeout']['late_by_s']}s, stale entry price)"
         ),
         "Gebührenannahme: Priorität 0.00012, Tip 0.0001, Basis 0.000005, Protokoll 1%.",
         "Stop 0.94 vom Fill-Preis, Take-Profit 2.0, Kaufgröße 0.05 SOL. Alles synthetisch.",
