@@ -22,11 +22,20 @@ THRESHOLDS = {
     "max_creator_signatures": 0,
     "min_real_sol": D("0.4"),
     "fail_closed": True,
+    "max_same_slot_buyers": 6,
+    "max_common_funder_pct": D("0"),
+    "block_on_unknown": False,
 }
 STOP_RATIO = D("0.94")
 TAKE_PROFIT_RATIO = D("2")
+PARTIAL_TP_X = D("1.3")
+PARTIAL_TP_PCT = D("0.5")
+TRAIL_ACTIVATE_X = D("1.15")
+TRAIL_PCT = D("0.08")
 START_SOL = D("1.00")
 BUY_SOL = D("0.05")
+MIN_BUY_SOL = D("0.02")
+MAX_EXIT_IMPACT = D("0.05")
 
 
 def fmt_pct(value: Decimal) -> str:
@@ -69,19 +78,37 @@ def evaluate_rug(signals: dict, thresholds: dict | None = None) -> list[str]:
             f"top_holder_pct {fmt_pct(holder)} > {fmt_pct(rules['max_top_holder_pct'])}"
         )
 
-    dev = signals.get("dev_buy_share_pct")
-    if dev is not None and D(dev) > rules["max_dev_buy_share_pct"]:
+    unknowns: list[str] = []
+    dev = signals.get("dev_buy_share_pct", None)
+    if "dev_buy_share_pct" not in signals or dev is None:
+        if "dev_buy_share_pct" in signals and dev is None:
+            unknowns.append("dev_buy_share_unknown")
+    elif D(dev) > rules["max_dev_buy_share_pct"]:
         reasons.append(
             f"dev_buy_share_pct {fmt_pct(dev)} > {fmt_pct(rules['max_dev_buy_share_pct'])}"
         )
 
-    launches = signals.get("creator_launches")
-    if launches is not None and launches > rules["max_creator_launches"]:
+    launches = signals.get("creator_launches", None)
+    if "creator_launches" in signals and launches is None:
+        unknowns.append("creator_launches_unknown")
+    elif launches is not None and launches > rules["max_creator_launches"]:
         reasons.append(f"creator_launches {launches} > {rules['max_creator_launches']}")
 
-    rugs = signals.get("creator_rugs")
-    if rugs is not None and rugs > rules["max_creator_rugs"]:
+    rugs = signals.get("creator_rugs", None)
+    if "creator_rugs" in signals and rugs is None:
+        unknowns.append("creator_rugs_unknown")
+    elif rugs is not None and rugs > rules["max_creator_rugs"]:
         reasons.append(f"creator_rugs {rugs} > {rules['max_creator_rugs']}")
+
+    slot = signals.get("same_slot_buyers", None)
+    max_slot = rules.get("max_same_slot_buyers", 0)
+    if max_slot and "same_slot_buyers" in signals and slot is None:
+        unknowns.append("same_slot_buyers_unknown")
+    elif max_slot and slot is not None and slot > max_slot:
+        reasons.append(f"bundled_same_slot {slot} > {max_slot}")
+
+    if rules.get("block_on_unknown"):
+        reasons.extend(f"unknown_blocks {name}" for name in unknowns)
 
     # A full signature page is a lookup cap, not a count. Only an uncapped
     # sample can trip the optional raw-signature rule, and that rule is off
@@ -247,16 +274,87 @@ def clean_token(**overrides: object) -> dict:
     return base
 
 
+def plan_exit(ratio: Decimal, *, partial_done: bool, peak: Decimal) -> tuple[str, Decimal, bool, Decimal]:
+    """Same order as the JS exit plan: hard stop, full TP, partial, trail."""
+    peak = ratio if ratio > peak else peak
+    if ratio <= STOP_RATIO:
+        return "stop_loss", D("1"), partial_done, peak
+    if ratio >= TAKE_PROFIT_RATIO:
+        return "take_profit", D("1"), partial_done, peak
+    if not partial_done and ratio >= PARTIAL_TP_X:
+        return "partial_take_profit", PARTIAL_TP_PCT, True, peak
+    if peak >= TRAIL_ACTIVATE_X and ratio <= peak * (D(1) - TRAIL_PCT):
+        return "trailing_stop", D("1"), partial_done, peak
+    return "hold", D("0"), partial_done, peak
+
+
+def expand_path(ratios: list[Decimal]) -> list[Decimal]:
+    """A quote that jumps straight to 2x still has to pass the 1.3 partial."""
+    out: list[Decimal] = []
+    armed = False
+    for ratio in ratios:
+        if ratio >= PARTIAL_TP_X and not armed and ratio > PARTIAL_TP_X:
+            out.append(PARTIAL_TP_X)
+        out.append(ratio)
+        if ratio >= PARTIAL_TP_X:
+            armed = True
+    return out
+
+
 def drive_exit(book: harness.ProposedBook, curve: harness.Curve, mint: str, ratios: list[Decimal]):
     position = book.positions[mint]
     fill = position.sol_in / position.tokens
-    for ratio in ratios:
-        if ratio <= STOP_RATIO or ratio >= TAKE_PROFIT_RATIO:
-            curve.set_spot(fill * ratio)
-            reason = "stop_loss" if ratio <= STOP_RATIO else "take_profit"
-            return book.try_sell(mint, curve, reason=reason), fill
-    curve.set_spot(fill * ratios[-1])
-    return book.try_sell(mint, curve, reason="timeout"), fill
+    partial_done = False
+    peak = D("1")
+    sold = None
+    for ratio in expand_path(ratios):
+        kind, frac, partial_done, peak = plan_exit(ratio, partial_done=partial_done, peak=peak)
+        if kind == "hold":
+            continue
+        curve.set_spot(fill * ratio)
+        sold = book.try_sell(mint, curve, reason=kind, fraction=frac)
+        if book.positions[mint].status == "closed":
+            return sold, fill
+    if book.positions[mint].status == "open":
+        curve.set_spot(fill * ratios[-1])
+        sold = book.try_sell(mint, curve, reason="timeout", fraction=D("1"))
+    return sold, fill
+
+
+def confirm_entry(*, buyers: int, buys: int, sells: int, pump: Decimal, window_ms: int = 8000, elapsed_ms: int = 8000) -> str:
+    if window_ms <= 0:
+        return "confirm_off"
+    if elapsed_ms < window_ms:
+        return "confirm_wait"
+    reasons = []
+    if buyers < 3:
+        reasons.append(f"buyers {buyers} < 3")
+    ratio = D(buys) / D(sells) if sells else D("999")
+    if ratio < D("1.5"):
+        reasons.append(f"buy_sell_ratio {ratio}")
+    if pump > D("1.8"):
+        reasons.append(f"pre_entry_pump {pump}")
+    if reasons:
+        return "skip:" + "; ".join(reasons)
+    return "confirmed"
+
+
+def size_for_impact(vsol: Decimal, vtok: Decimal, max_sol: Decimal, min_sol: Decimal, limit: Decimal):
+    def gap(sol: Decimal) -> Decimal:
+        return exit_spot_gap(vsol, vtok, sol)
+
+    if gap(max_sol) <= limit:
+        return max_sol, False, gap(max_sol)
+    if gap(min_sol) > limit:
+        return min_sol, True, gap(min_sol)
+    lo, hi = min_sol, max_sol
+    for _ in range(18):
+        mid = (lo + hi) / D(2)
+        if gap(mid) <= limit:
+            lo = mid
+        else:
+            hi = mid
+    return lo, False, gap(lo)
 
 
 def run_campaign() -> dict:
@@ -296,6 +394,8 @@ def run_campaign() -> dict:
         ("STOP_NEAR", clean_token(), "approve", [D("1.02"), D("0.97"), D("0.93")]),
         ("RUG_FAST", clean_token(), "approve", [D("1.08"), D("0.94"), D("0.40")]),
         ("TIMEOUT_FADE", clean_token(), "approve", [D("0.98")]),
+        ("BUNDLE", clean_token(same_slot_buyers=9), "approve", None),
+        ("PARTIAL_TRAIL", clean_token(), "approve", [D("1.40"), D("1.20")]),
     ]
 
     for mint, signals, approval, path in cases:
@@ -347,6 +447,36 @@ def run_campaign() -> dict:
             "fill": fill,
             "sold": bool(sold and sold.sold),
         })
+
+    sized_pool = (D("1"), D("10000"))
+    sized_sol, sized_skipped, sized_gap = size_for_impact(
+        *sized_pool, BUY_SOL, MIN_BUY_SOL, MAX_EXIT_IMPACT,
+    )
+    floor_sol, floor_skip, floor_gap = size_for_impact(
+        D("0.35"), D("500"), BUY_SOL, MIN_BUY_SOL, MAX_EXIT_IMPACT,
+    )
+    if not sized_skipped:
+        human_buys += 1
+        sized_item = queue.propose("SIZED", str(sized_sol), "scaled under exit impact")
+        queue.decide(sized_item["id"], "approved")
+        sized_curve = harness.Curve(virtual_sol=sized_pool[0], virtual_token=sized_pool[1])
+        sized_buy = book.try_buy("SIZED", sized_curve, sized_sol)
+        if sized_buy.accepted:
+            sold, fill = drive_exit(book, sized_curve, "SIZED", [D("1.05")])
+            position = book.positions["SIZED"]
+            trades.append({
+                "mint": "SIZED",
+                "status": position.status,
+                "exit": position.exit_reason,
+                "pnl": position.cash_pnl(),
+                "fill": fill,
+                "sold": bool(sold and sold.sold),
+                "size": sized_sol,
+            })
+
+    entry_skip = confirm_entry(buyers=1, buys=1, sells=2, pump=D("1.1"))
+    entry_pump = confirm_entry(buyers=5, buys=8, sells=1, pump=D("2.4"))
+    entry_ok = confirm_entry(buyers=4, buys=6, sells=1, pump=D("1.2"))
 
     slow = harness.ProposedBook(START_SOL, stop_ratio=STOP_RATIO, take_profit_ratio=TAKE_PROFIT_RATIO)
     slow_curve = harness.fresh_curve()
@@ -428,6 +558,17 @@ def run_campaign() -> dict:
         "quiet_timeout": quiet_timeout(),
         "thin_exit_gap": exit_spot_gap(D("1"), D("1000"), D("0.2")),
         "deep_exit_gap": exit_spot_gap(D("1000"), D("1000000"), D("0.05")),
+        "partial_exits": sum(1 for event in book.events if event.get("reason") == "partial_take_profit"),
+        "trail_exits": sum(1 for event in book.events if event.get("reason") == "trailing_stop"),
+        "sized_sol": sized_sol,
+        "sized_skipped": sized_skipped,
+        "sized_gap": sized_gap,
+        "floor_skip": floor_skip,
+        "floor_gap": floor_gap,
+        "floor_sol": floor_sol,
+        "entry_skip": entry_skip,
+        "entry_pump": entry_pump,
+        "entry_ok": entry_ok,
     }
 
 
@@ -491,7 +632,16 @@ def format_report(result: dict) -> str:
             "Ueber 5% wird nicht gekauft. Ein Crash in einem einzelnen Trade kann den Quote trotzdem unter 0.94 druecken."
         ),
         "Gebührenannahme: Priorität 0.00012, Tip 0.0001, Basis 0.000005, Protokoll 1%.",
-        "Stop 0.94 vom Fill-Preis, Take-Profit 2.0, Kaufgröße 0.05 SOL. Alles synthetisch.",
+        "Stop 0.94 vom Fill-Preis, Take-Profit 2.0, Teilverkauf 50% bei 1.3, Trail 8% unter dem Peak ab 1.15. Kaufgröße höchstens 0.05 SOL, skaliert unter 5% Exit-Impact. Alles synthetisch.",
+        (
+            f"Teilverkäufe: {result['partial_exits']}, Trailing-Stops: {result['trail_exits']}, "
+            f"skalierte Größe: {money(result['sized_sol'])} SOL (übersprungen={result['sized_skipped']}), "
+            f"Floor zu groß: {result['floor_skip']}."
+        ),
+        (
+            f"Einstiegsfenster: knapp {result['entry_skip']}; schon gelaufen {result['entry_pump']}; "
+            f"bestätigt {result['entry_ok']}."
+        ),
     ])
     return "\n".join(lines)
 

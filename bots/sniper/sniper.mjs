@@ -12,6 +12,10 @@ import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { defaultApprovalFile, listForBot } from "../../lib/approval.mjs";
 import { runGuardedBuy } from "../../lib/buy-gate.mjs";
 import { historyFile, noteLaunch, noteRug } from "../../lib/creator-history.mjs";
+import { confirmEntry, loadEntryConfig } from "../../lib/entry-confirm.mjs";
+import { loadExitConfig, planExit } from "../../lib/exit-plan.mjs";
+import { sizeForImpact } from "../../lib/sizing.mjs";
+import { appendTrade, tradeLogFile } from "../../lib/trade-log.mjs";
 import { loadMintBlock, saveMintBlock } from "../../lib/graduation-entry.mjs";
 import { claimHold, heldByOther, heldMintsFile, releaseHold } from "../../lib/held-mints.mjs";
 import { ROOT, SLIPPAGE_BPS } from "../../lib/config.mjs";
@@ -21,14 +25,13 @@ import {
   TRADE_EVENT_PREFIX,
   BUY_INSTRUCTIONS,
   CREATE_INSTRUCTIONS,
+  SELL_INSTRUCTIONS,
 } from "../../lib/constants.mjs";
 import {
   DEFAULT_STOP_RATIO,
   earlyStopMargin,
   effectiveStopRatio,
-  evaluateExit,
   staleExitMark,
-  timeoutDue,
   fillPriceSolPerToken,
   loadPositions,
   positionFile,
@@ -67,6 +70,10 @@ const TOKEN_COOLDOWN_SEC = Number(process.env.SNIPER_TOKEN_COOLDOWN_SEC || 600);
 const MAX_CURVE_SOL = Number(process.env.SNIPER_MAX_CURVE_SOL || 12);
 const MIN_CURVE_SOL = Number(process.env.SNIPER_MIN_CURVE_SOL || 2);
 const MAX_EXIT_IMPACT_PCT = Number(process.env.MAX_EXIT_IMPACT_PCT || 5);
+const MIN_BUY_SOL = Number(process.env.MIN_BUY_SOL || 0.02);
+const exitConfig = loadExitConfig();
+const entryConfig = loadEntryConfig();
+const tradesPath = tradeLogFile(ROOT);
 const NO_REENTRY = !["0", "false", "no", "off"].includes(String(process.env.SNIPER_NO_REENTRY_AFTER_STOP ?? "1").toLowerCase());
 const STOP_TRIGGER = effectiveStopRatio(STOP_LOSS, earlyStopMargin());
 const POLL_MS = positionPollMs();
@@ -83,6 +90,7 @@ const block = loadMintBlock(blockPath);
 const retries = createRetryQueue({ maxAttempts: 3 });
 const mintSubs = new Map();
 const noted = new Set();
+const pending = new Map();
 let pollCursor = 0;
 let ws;
 
@@ -98,6 +106,28 @@ let lastBuyTime = 0;
 
 function log(msg) {
   console.log(`[${new Date().toISOString().slice(11, 19)}] ${msg}`);
+}
+
+function exitKind(reason) {
+  const text = String(reason);
+  if (text.startsWith("stop-loss")) return "stop_loss";
+  if (text.startsWith("partial-tp")) return "partial_take_profit";
+  if (text.startsWith("trail-stop")) return "trailing_stop";
+  if (text.startsWith("take-profit")) return "take_profit";
+  if (text.startsWith("timeout")) return "timeout";
+  return text.split(" ")[0] || "exit";
+}
+
+function sizedReason(sol) {
+  return Math.abs(sol - BUY_SOL) < 1e-9 ? "size_max" : "size_scaled";
+}
+
+function journal(row) {
+  try {
+    appendTrade(tradesPath, row);
+  } catch (err) {
+    log(`  trade log: ${err.message}`);
+  }
 }
 
 function persist() {
@@ -125,11 +155,12 @@ function parseV3TradeEvent(data) {
 }
 
 function parseLogEvents(logs) {
-  let isBuy = false, isCreate = false;
+  let isBuy = false, isCreate = false, isSell = false;
   for (const line of logs) {
     const m = line.match(/Instruction: (\w+)/);
     if (!m) continue;
     if (BUY_INSTRUCTIONS.has(m[1])) isBuy = true;
+    if (SELL_INSTRUCTIONS.has(m[1])) isSell = true;
     if (CREATE_INSTRUCTIONS.has(m[1])) isCreate = true;
   }
 
@@ -143,17 +174,18 @@ function parseLogEvents(logs) {
       const parsed = parseV3TradeEvent(raw);
       if (!parsed) continue;
       if (isCreate) events.push({ type: "create", creator: parsed.user, ...parsed });
-      if (isBuy) events.push({ type: "trade", isBuy: true, ...parsed });
+      if (isBuy || isSell) events.push({ type: "trade", isBuy: isBuy && !isSell, ...parsed });
     } catch {}
   }
   return events;
 }
 
-function quoteFill(state, decimals) {
-  const tokens = calcBuyTokens(state, BUY_SOL);
+function quoteFill(state, decimals, solIn = BUY_SOL) {
+  const tokens = calcBuyTokens(state, solIn);
   return {
     tokens,
-    fillPrice: fillPriceSolPerToken(BUY_SOL, tokens, decimals),
+    solIn,
+    fillPrice: fillPriceSolPerToken(solIn, tokens, decimals),
     entrySpot: spotSolPerToken(state.virtualSolReserves, state.virtualTokenReserves, decimals),
   };
 }
@@ -190,12 +222,18 @@ async function paperBuy(mint, context) {
     log(`  skip: bonding curve unavailable`);
     return;
   }
-  const quote = quoteFill(state, context.decimals || 6);
+  const solIn = Number(context.solIn) > 0 ? Number(context.solIn) : BUY_SOL;
+  const quote = quoteFill(state, context.decimals || 6, solIn);
   remember(mint, {
     tokens: quote.tokens.toString(),
     fillPrice: quote.fillPrice,
     entrySpot: quote.entrySpot,
-    solIn: BUY_SOL,
+    solIn,
+    remainingFrac: 1,
+    partialDone: false,
+    peakRatio: 1,
+    entryLiquiditySol: context.entryLiquiditySol ?? null,
+    filters: context.filters || [],
     entryTime: Date.now(),
     decimals: context.decimals || 6,
     creator: context.creator || null,
@@ -225,13 +263,14 @@ async function signBuy(mint, context = {}) {
   if (!state || state.complete) throw new Error("bonding curve unavailable");
 
   const decimals = signals.decimals || context.decimals || 6;
-  const quote = quoteFill(state, decimals);
+  const solIn = Number(context.solIn) > 0 ? Number(context.solIn) : BUY_SOL;
+  const quote = quoteFill(state, decimals, solIn);
   const minTokens = (quote.tokens * BigInt(10000 - SLIPPAGE_BPS)) / 10000n;
-  log(`  buying ${BUY_SOL} SOL -> ~${(Number(quote.tokens) / 10 ** decimals).toFixed(0)} tokens`);
+  log(`  buying ${solIn} SOL -> ~${(Number(quote.tokens) / 10 ** decimals).toFixed(0)} tokens`);
 
   const ixs = [
     ...computeBudgetIxs(),
-    buyIx(wallet.publicKey, mintPk, BUY_SOL, minTokens),
+    buyIx(wallet.publicKey, mintPk, solIn, minTokens),
     jitoTipIx(wallet.publicKey),
   ];
   const tx = await buildVersionedTx(wallet, ixs);
@@ -245,7 +284,7 @@ async function signBuy(mint, context = {}) {
     const actual = BigInt(info.value.amount);
     if (actual > 0n) {
       tokens = actual;
-      const priced = fillPriceSolPerToken(BUY_SOL, actual, decimals);
+      const priced = fillPriceSolPerToken(solIn, actual, decimals);
       if (priced) fill = priced;
     }
   } catch (err) {
@@ -255,7 +294,12 @@ async function signBuy(mint, context = {}) {
     tokens: tokens.toString(),
     fillPrice: fill,
     entrySpot: quote.entrySpot,
-    solIn: BUY_SOL,
+    solIn,
+    remainingFrac: 1,
+    partialDone: false,
+    peakRatio: 1,
+    entryLiquiditySol: context.entryLiquiditySol ?? null,
+    filters: context.filters || [],
     entryTime: Date.now(),
     decimals,
     creator: context.creator || null,
@@ -307,14 +351,31 @@ async function considerCreate(create, devTrade, opts = {}) {
     return;
   }
   const preview = curveFromTrade(trade);
+  let buySol = BUY_SOL;
+  let entryImpact = null;
   if (preview) {
-    const impact = exitImpactOfBuy(preview, BUY_SOL);
-    if (impact && impact.spotGapPct * 100 > MAX_EXIT_IMPACT_PCT) {
+    const sized = sizeForImpact(
+      (sol) => exitImpactOfBuy(preview, sol)?.spotGapPct,
+      { maxSol: BUY_SOL, minSol: Math.min(MIN_BUY_SOL, BUY_SOL), maxImpactPct: MAX_EXIT_IMPACT_PCT },
+    );
+    entryImpact = sized.impactPct;
+    if (sized.skip) {
       block.seen.add(create.mint);
-      log(`skip ${create.mint.slice(0, 8)}: exit impact ${(impact.spotGapPct * 100).toFixed(2)}% > ${MAX_EXIT_IMPACT_PCT}%`);
+      const reason = `exit impact ${(sized.impactPct ?? 0).toFixed(2)}% at ${sized.sol.toFixed(4)} SOL > ${MAX_EXIT_IMPACT_PCT}%`;
+      log(`skip ${create.mint.slice(0, 8)}: ${reason}`);
+      journal({
+        event: "skip",
+        bot: "sniper",
+        mint: create.mint,
+        skipReason: "min_buy_still_exceeds_impact",
+        entryLiquiditySol: realSol,
+        sizeSol: sized.sol,
+        expectedFill: sized.impactPct,
+      });
       persistBlock();
       return;
     }
+    buySol = sized.sol;
   }
   if (!opts.fromRetry) {
     if (slotsUsed() >= MAX_POSITIONS) return;
@@ -347,7 +408,11 @@ async function considerCreate(create, devTrade, opts = {}) {
       creatorLaunches: stats.launches,
       creatorRugs: stats.rugs,
       realSol,
+      sameSlotBuyers: opts.sameSlotBuyers ?? null,
+      commonFunderPct: opts.commonFunderPct ?? null,
     });
+    const filters = ["fresh_curve", sizedReason(buySol), "rug"];
+    if (entryConfig.windowMs > 0) filters.push("entry_confirm");
     const meta = {
       creator: create.creator,
       creatorLaunches: stats.launches,
@@ -355,11 +420,15 @@ async function considerCreate(create, devTrade, opts = {}) {
       devBuyTokensRaw: devBuyTokensRaw == null ? null : devBuyTokensRaw.toString(),
       decimals: signals.decimals || 6,
       curve,
+      solIn: buySol,
+      entryLiquiditySol: realSol,
+      filters,
+      entryImpact,
     };
     const gated = await runGuardedBuy({
       bot: "sniper",
       mint: create.mint,
-      amountSol: BUY_SOL,
+      amountSol: buySol,
       reason: `sniper create by ${create.creator}`,
       dryRun: DRY_RUN,
       autoBuy: AUTO_BUY,
@@ -372,6 +441,17 @@ async function considerCreate(create, devTrade, opts = {}) {
       onPaper: () => paperBuy(create.mint, meta),
       sign: () => signBuy(create.mint, meta),
     });
+    if (gated.rug && !gated.rug.ok && !gated.deferred) {
+      journal({
+        event: "skip",
+        bot: "sniper",
+        mint: create.mint,
+        skipReason: gated.rug.reasons.join("; ") || "rug",
+        entryLiquiditySol: realSol,
+        sizeSol: buySol,
+        filters,
+      });
+    }
     if (gated.deferred) {
       releaseHold(holdPath, "sniper", create.mint);
       const queued = retries.push(create.mint, 2000, () => considerCreate(create, devTrade, { fromRetry: true }));
@@ -387,11 +467,19 @@ async function considerCreate(create, devTrade, opts = {}) {
   }
 }
 
-async function executeSell(mint, reason, markHint) {
+function keepTokens(tokens, keepFrac) {
+  if (tokens == null) return tokens;
+  const bps = BigInt(Math.max(0, Math.round(keepFrac * 1_000_000)));
+  return ((BigInt(tokens) * bps) / 1_000_000n).toString();
+}
+
+async function executeSell(mint, reason, markHint, sellPct = 100) {
   if (exiting.has(mint)) return;
   const pos = positions.get(mint);
   if (!pos) return;
   exiting.add(mint);
+  const frac = Math.min(100, Math.max(1, Number(sellPct) || 100)) / 100;
+  const partial = frac < 0.999;
   const mintPk = new PublicKey(mint);
   log(`  selling ${mint.slice(0, 8)}... (${reason})`);
   try {
@@ -409,13 +497,35 @@ async function executeSell(mint, reason, markHint) {
       }
       if (sellPrice > 0 && pos.fillPrice > 0) {
         const pnlPct = ((sellPrice / pos.fillPrice) - 1) * 100;
-        const pnlSol = BUY_SOL * (pnlPct / 100);
+        const basis = Number(pos.solIn || BUY_SOL) * (pos.remainingFrac ?? 1);
+        const pnlSol = basis * frac * (pnlPct / 100);
         const holdSec = ((Date.now() - pos.entryTime) / 1000).toFixed(0);
-        totalTrades++;
         totalPnl += pnlSol;
-        if (pnlPct > 0) wins++;
-        log(`  [DRY RUN] would sell: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL), held ${holdSec}s`);
+        journal({
+          event: partial ? "partial" : "close",
+          bot: "sniper",
+          mint,
+          entryLiquiditySol: pos.entryLiquiditySol ?? null,
+          sizeSol: basis * frac,
+          filters: pos.filters || [],
+          exitType: partial ? "partial_take_profit" : exitKind(reason),
+          expectedFill: hint.expected ?? null,
+          simulatedFill: sellPrice,
+          pnlSol,
+        });
+        if (!partial) {
+          totalTrades++;
+          if (pnlPct > 0) wins++;
+        }
+        log(`  [DRY RUN] would sell ${Math.round(frac * 100)}%: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL), held ${holdSec}s`);
         log(`  ${sessionLine()}`);
+      }
+      if (partial) {
+        pos.partialDone = true;
+        pos.remainingFrac = (pos.remainingFrac ?? 1) * (1 - frac);
+        pos.tokens = keepTokens(pos.tokens, 1 - frac);
+        persist();
+        return;
       }
       finishMint(mint, reason);
       positions.delete(mint);
@@ -425,7 +535,10 @@ async function executeSell(mint, reason, markHint) {
 
     const ata = getAssociatedTokenAddressSync(mintPk, wallet.publicKey, false, TOKEN_2022_PROGRAM);
     const info = await connection.getTokenAccountBalance(ata);
-    const tokenAmount = BigInt(info.value.amount);
+    const walletTokens = BigInt(info.value.amount);
+    const tokenAmount = partial
+      ? (walletTokens * BigInt(Math.round(frac * 1_000_000))) / 1_000_000n
+      : walletTokens;
     if (tokenAmount === 0n) {
       log(`  no tokens in wallet`);
       finishMint(mint, reason);
@@ -453,9 +566,30 @@ async function executeSell(mint, reason, markHint) {
 
     const sellPrice = spotSolPerToken(state.virtualSolReserves, state.virtualTokenReserves, pos.decimals || 6);
     const pnlPct = ((sellPrice / pos.fillPrice) - 1) * 100;
-    const pnlSol = Number(expectedSol) / 1e9 - BUY_SOL;
+    const basis = Number(pos.solIn || BUY_SOL) * (pos.remainingFrac ?? 1);
+    const pnlSol = partial ? basis * frac * (pnlPct / 100) : Number(expectedSol) / 1e9 - basis;
     const holdSec = ((Date.now() - pos.entryTime) / 1000).toFixed(0);
     totalPnl += pnlSol;
+    journal({
+      event: partial ? "partial" : "close",
+      bot: "sniper",
+      mint,
+      entryLiquiditySol: pos.entryLiquiditySol ?? null,
+      sizeSol: basis * frac,
+      filters: pos.filters || [],
+      exitType: partial ? "partial_take_profit" : exitKind(reason),
+      expectedFill: Number(expectedSol) / 1e9,
+      simulatedFill: sellPrice,
+      pnlSol,
+    });
+    if (partial) {
+      pos.partialDone = true;
+      pos.remainingFrac = (pos.remainingFrac ?? 1) * (1 - frac);
+      pos.tokens = keepTokens(pos.tokens, 1 - frac);
+      persist();
+      log(`  sold ${Math.round(frac * 100)}%: ${pnlPct > 0 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL), held ${holdSec}s`);
+      return;
+    }
     totalTrades++;
     if (pnlSol > 0) wins++;
     log(`  sold: ${pnlPct > 0 ? "+" : ""}${pnlPct.toFixed(1)}% (${pnlSol >= 0 ? "+" : ""}${pnlSol.toFixed(4)} SOL), held ${holdSec}s`);
@@ -481,19 +615,24 @@ function noteMark(mint, virtualSol, virtualToken) {
   const expected = pos.tokens
     ? expectedSellPrice({ virtualSolReserves: virtualSol, virtualTokenReserves: virtualToken }, pos.tokens, pos.decimals || 6)
     : null;
-  const decision = evaluateExit({
-    mark,
-    expectedFill: expected,
-    fillPrice: pos.fillPrice,
+  if (expected > 0) pos.lastExpected = expected;
+  const ratio = expected > 0 && pos.fillPrice > 0 ? expected / pos.fillPrice : (mark > 0 && pos.fillPrice > 0 ? mark / pos.fillPrice : null);
+  const decision = planExit({
+    ratio,
+    now: Date.now(),
     entryTime: pos.entryTime,
     stopRatio: STOP_TRIGGER,
-    takeProfitRatio: TAKE_PROFIT,
+    fullTpX: TAKE_PROFIT,
     timeoutSec: TIMEOUT_SEC,
+    partialDone: Boolean(pos.partialDone),
+    peakRatio: pos.peakRatio ?? 1,
+    ...exitConfig,
   });
-  if (decision.kind === "stop_loss") {
-    executeSell(mint, decision.reason, { trigger: mark, expected, simulated: expected });
-  } else if (decision.action === "sell") {
-    executeSell(mint, decision.reason, mark);
+  pos.peakRatio = decision.peakRatio;
+  if (decision.kind === "timeout") return;
+  if (decision.action === "sell") {
+    const hint = { trigger: mark, expected, simulated: expected };
+    executeSell(mint, decision.reason, decision.kind === "stop_loss" ? hint : hint, decision.sellPct);
   }
 }
 
@@ -524,12 +663,26 @@ async function checkPositions() {
 function sweepTimeouts() {
   const now = Date.now();
   for (const [mint, pos] of [...positions]) {
-    if (!timeoutDue(pos.entryTime, now, TIMEOUT_SEC)) continue;
+    const price = pos.lastExpected > 0 ? pos.lastExpected : pos.lastMark;
+    const ratio = price > 0 && pos.fillPrice > 0 ? price / pos.fillPrice : null;
+    const decision = planExit({
+      ratio,
+      now,
+      entryTime: pos.entryTime,
+      stopRatio: STOP_TRIGGER,
+      fullTpX: TAKE_PROFIT,
+      timeoutSec: TIMEOUT_SEC,
+      partialDone: Boolean(pos.partialDone),
+      peakRatio: pos.peakRatio ?? 1,
+      ...exitConfig,
+    });
+    pos.peakRatio = decision.peakRatio;
+    if (decision.action !== "sell" || decision.kind !== "timeout") continue;
     const held = ((now - pos.entryTime) / 1000).toFixed(0);
-    const { price, source } = staleExitMark(pos);
+    const { source } = staleExitMark(pos);
     const fresh = source === "last" && pos.lastMarkAt && now - pos.lastMarkAt <= 5000;
     if (!fresh) log(`  WARN ${mint.slice(0, 8)}: timeout ${held}s using ${source} price, no fresh mark`);
-    executeSell(mint, `timeout ${held}s`, price);
+    executeSell(mint, decision.reason, { trigger: pos.lastMark, expected: pos.lastExpected, simulated: price });
   }
 }
 
@@ -582,7 +735,8 @@ function resumeQueuedBuys() {
 
 log("=== SNIPER BOT (V3) ===");
 log(`Wallet: ${wallet.publicKey.toBase58()}`);
-log(`Config: buy=${BUY_SOL} SOL, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x of fill, trigger ${STOP_TRIGGER.toFixed(3)}x, timeout=${TIMEOUT_SEC}s`);
+log(`Config: buy<=${BUY_SOL} SOL, floor ${MIN_BUY_SOL}, partial ${exitConfig.partialTpPct}% @ ${exitConfig.partialTpX}x, trail ${exitConfig.trailPct} after ${exitConfig.trailActivateX}x, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x of fill, trigger ${STOP_TRIGGER.toFixed(3)}x, timeout=${TIMEOUT_SEC}s, max hold ${exitConfig.maxHoldSec}s`);
+log(`Entry confirm: ${entryConfig.windowMs}ms, buyers>=${entryConfig.minBuyers}, buy/sell>=${entryConfig.minBuySellRatio}, pump<=${entryConfig.maxPumpX}x`);
 log(`Max positions: ${MAX_POSITIONS}, cooldown: ${COOLDOWN_SEC}s, per-token ${TOKEN_COOLDOWN_SEC}s, fresh curve <= ${MAX_CURVE_SOL} SOL`);
 log(`Price: per-mint websocket + one held mint every ${POLL_MS}ms. No re-entry after stop: ${NO_REENTRY}`);
 log(DRY_RUN
@@ -602,28 +756,122 @@ for (const mint of positions.keys()) {
   watchMint(mint);
 }
 
+function sameSlotCount(events, mint, slot) {
+  const users = new Set();
+  for (const event of events) {
+    if (event.type === "trade" && event.isBuy && event.mint === mint && event.user) users.add(event.user);
+  }
+  return users.size || null;
+}
+
+function observePending(events, slot) {
+  for (const event of events) {
+    if (event.type !== "trade") continue;
+    const row = pending.get(event.mint);
+    if (!row) continue;
+    const price = event.virtualSolReserves && event.virtualTokenReserves
+      ? spotSolPerToken(event.virtualSolReserves, event.virtualTokenReserves, 6)
+      : null;
+    if (row.launchPrice == null && price > 0) row.launchPrice = price;
+    if (price > 0) row.price = price;
+    if (event.isBuy) {
+      row.buys += 1;
+      if (event.user) row.buyers.add(event.user);
+      if (slot != null && event.user) {
+        const key = String(slot);
+        const set = row.slots.get(key) || new Set();
+        set.add(event.user);
+        row.slots.set(key, set);
+      }
+    } else {
+      row.sells += 1;
+    }
+  }
+}
+
+function slotPeak(row) {
+  let peak = 0;
+  for (const set of row.slots.values()) peak = Math.max(peak, set.size);
+  return peak || null;
+}
+
+async function sweepConfirms() {
+  if (!(entryConfig.windowMs > 0)) return;
+  const now = Date.now();
+  for (const [mint, row] of [...pending]) {
+    const decision = confirmEntry({
+      elapsedMs: now - row.started,
+      windowMs: entryConfig.windowMs,
+      uniqueBuyers: row.buyers.size,
+      buys: row.buys,
+      sells: row.sells,
+      price: row.price,
+      launchPrice: row.launchPrice,
+      minBuyers: entryConfig.minBuyers,
+      minBuySellRatio: entryConfig.minBuySellRatio,
+      maxPumpX: entryConfig.maxPumpX,
+    });
+    if (decision.action === "wait") continue;
+    pending.delete(mint);
+    if (decision.action === "skip") {
+      block.seen.add(mint);
+      persistBlock();
+      log(`skip ${mint.slice(0, 8)}: ${decision.reason}`);
+      journal({
+        event: "skip",
+        bot: "sniper",
+        mint,
+        skipReason: decision.reason,
+        entryLiquiditySol: realSolOf(row.devTrade || row.create),
+      });
+      continue;
+    }
+    await considerCreate(row.create, row.devTrade, { sameSlotBuyers: slotPeak(row) });
+  }
+}
+
 ws.subscribeLogs(PUMP_PROGRAM.toBase58(), async (result) => {
   const { value } = result;
   if (!value?.logs) return;
   const lastLog = value.logs[value.logs.length - 1] || "";
   if (!lastLog.includes("success")) return;
+  const slot = result?.context?.slot ?? null;
 
   forEachTradeMark(value.logs, (mark) => {
     if (positions.has(mark.mint)) noteMark(mark.mint, mark.virtualSolReserves, mark.virtualTokenReserves);
   });
 
   const events = parseLogEvents(value.logs);
+  observePending(events, slot);
   const creates = events.filter((event) => event.type === "create");
   for (const create of creates) {
     const devTrade = events.find(
       (event) => event.type === "trade" && event.isBuy && event.mint === create.mint && event.user === create.creator,
     );
-    await considerCreate(create, devTrade);
+    if (!(entryConfig.windowMs > 0)) {
+      await considerCreate(create, devTrade, { sameSlotBuyers: sameSlotCount(events, create.mint, slot) });
+      continue;
+    }
+    if (pending.has(create.mint) || block.seen.has(create.mint)) continue;
+    const row = {
+      create,
+      devTrade,
+      started: Date.now(),
+      buyers: new Set(),
+      buys: 0,
+      sells: 0,
+      launchPrice: null,
+      price: null,
+      slots: new Map(),
+    };
+    pending.set(create.mint, row);
+    observePending(events, slot);
   }
 });
 
 setInterval(checkPositions, POLL_MS);
 setInterval(sweepTimeouts, 1000);
+setInterval(() => { sweepConfirms().catch((err) => log(`  confirm error: ${err.message}`)); }, 500);
 setInterval(() => { retries.drain().catch((err) => log(`  retry error: ${err.message}`)); }, 1000);
 log("\nListening for new tokens...\n");
 

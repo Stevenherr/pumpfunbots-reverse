@@ -41,7 +41,9 @@
   <div class="card"><div class="label">Total Trades</div><div class="value blue" id="trades">-</div></div>
   <div class="card"><div class="label">Buys</div><div class="value" id="buys">-</div></div>
   <div class="card"><div class="label">Sells</div><div class="value red" id="sells">-</div></div>
-  <div class="card"><div class="label">Volume (SOL)</div><div class="value blue" id="volume">-</div></div>
+  <div class="card"><div class="label">Volume (SOL)</div><div class="value blue" id="volume">-</div><div class="muted" id="flagged"></div></div>
+  <div class="card"><div class="label">Paper PnL (SOL)</div><div class="value" id="paperPnl">-</div><div class="muted" id="paperMeta"></div></div>
+  <div class="card"><div class="label">Offene Positionen</div><div class="value" id="openCount">-</div><div class="muted" id="openSol"></div></div>
   <div class="card"><div class="label">Creates/min</div><div class="value" id="cpm">-</div></div>
   <div class="card"><div class="label">Trades/min</div><div class="value blue" id="tpm">-</div></div>
   <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">-</div></div>
@@ -61,6 +63,40 @@
   <table>
     <thead><tr><th>Name</th><th>Symbol</th><th>Mint</th><th>Creator</th><th>Time</th></tr></thead>
     <tbody id="tokens"></tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>Bot-Auswertung</h2>
+  <p class="muted">Aus data/trades.jsonl und den Positionsdateien. Kein Mainnet-Konto, keine Signatur.</p>
+  <table>
+    <thead><tr><th>Bot</th><th>Exits</th><th>Wins</th><th>PnL (SOL)</th></tr></thead>
+    <tbody id="byBot"></tbody>
+  </table>
+  <h2>Nach Exit</h2>
+  <table>
+    <thead><tr><th>Typ</th><th>Anzahl</th><th>Wins</th><th>PnL (SOL)</th></tr></thead>
+    <tbody id="byExit"></tbody>
+  </table>
+  <h2>Skips</h2>
+  <table>
+    <thead><tr><th>Grund</th><th>Anzahl</th></tr></thead>
+    <tbody id="bySkip"></tbody>
+  </table>
+  <h2>Liquidität beim Einstieg</h2>
+  <table>
+    <thead><tr><th>Bucket</th><th>Anzahl</th><th>PnL (SOL)</th></tr></thead>
+    <tbody id="byLiq"></tbody>
+  </table>
+  <h2>Stunde (UTC)</h2>
+  <table>
+    <thead><tr><th>Stunde</th><th>Anzahl</th><th>PnL (SOL)</th></tr></thead>
+    <tbody id="byHour"></tbody>
+  </table>
+  <h2>Offene Positionen</h2>
+  <table>
+    <thead><tr><th>Bot</th><th>Mint</th><th>SOL</th><th>Mark</th><th>Teilverkauf</th></tr></thead>
+    <tbody id="openRows"></tbody>
   </table>
 </div>
 
@@ -147,6 +183,7 @@ async function refresh() {
     document.getElementById('buys').textContent = fmt(d.buys);
     document.getElementById('sells').textContent = fmt(d.sells);
     document.getElementById('volume').textContent = d.volume;
+    document.getElementById('flagged').textContent = d.flagged ? `${d.flagged} unplausible Trades verworfen` : "";
     document.getElementById('cpm').textContent = d.createsPerMin;
     document.getElementById('tpm').textContent = d.tradesPerMin;
     document.getElementById('uptime').textContent = uptimeFmt(d.uptime);
@@ -168,10 +205,50 @@ async function refresh() {
   }
 }
 
+function sol4(value) {
+  const n = Number(value || 0);
+  return (n >= 0 ? "+" : "") + n.toFixed(4);
+}
+
+function fillRows(id, rows, cells, empty) {
+  document.getElementById(id).innerHTML = rows.length
+    ? rows.map((row) => `<tr>${cells(row)}</tr>`).join("")
+    : `<tr><td colspan="4" class="muted">${empty}</td></tr>`;
+}
+
+async function refreshReport() {
+  try {
+    const res = await fetch("/api/report");
+    const data = await res.json();
+    const paper = data.paper || {};
+    const summary = data.summary || {};
+    document.getElementById("paperPnl").textContent = sol4(paper.pnlSol);
+    document.getElementById("paperMeta").textContent = `${paper.trades || 0} Exits, Win-Rate ${((paper.winRate || 0) * 100).toFixed(0)}%`;
+    document.getElementById("openCount").textContent = paper.openCount ?? 0;
+    document.getElementById("openSol").textContent = `${Number(paper.openSol || 0).toFixed(4)} SOL eingesetzt`;
+    fillRows("byBot", summary.byBot || [], (row) =>
+      `<td>${esc(row.key)}</td><td>${row.count}</td><td>${row.wins}</td><td>${sol4(row.pnlSol)}</td>`, "keine Exits");
+    fillRows("byExit", summary.byExit || [], (row) =>
+      `<td>${esc(row.key)}</td><td>${row.count}</td><td>${row.wins}</td><td>${sol4(row.pnlSol)}</td>`, "keine Exits");
+    fillRows("bySkip", summary.bySkip || [], (row) =>
+      `<td>${esc(row.key)}</td><td>${row.count}</td><td></td><td></td>`, "keine Skips");
+    fillRows("byLiq", summary.byLiquidity || [], (row) =>
+      `<td>${esc(row.key)} SOL</td><td>${row.count}</td><td></td><td>${sol4(row.pnlSol)}</td>`, "keine Exits");
+    fillRows("byHour", summary.byHour || [], (row) =>
+      `<td>${esc(row.key)}</td><td>${row.count}</td><td></td><td>${sol4(row.pnlSol)}</td>`, "keine Exits");
+    fillRows("openRows", paper.open || [], (row) =>
+      `<td>${esc(row.bot)}</td><td>${esc(String(row.mint).slice(0, 12))}...</td><td>${Number(row.solIn || 0).toFixed(4)}</td><td>${row.markRatio == null ? "—" : Number(row.markRatio).toFixed(3) + "x"}</td><td>${row.partialDone ? "ja" : "nein"}</td>`, "keine offenen Positionen");
+  } catch {
+    document.getElementById("paperMeta").textContent = "Auswertung nicht erreichbar";
+  }
+}
+
 refresh();
 refreshApprovals();
+refreshReport();
 setInterval(refresh, 3000);
 setInterval(refreshApprovals, 2000);
+setInterval(refreshReport, 3000);
 </script>
 </body>
 </html>

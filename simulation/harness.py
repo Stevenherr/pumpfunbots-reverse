@@ -244,10 +244,16 @@ class ProposedBook:
         reason: str,
         adverse_slippage: bool = False,
         fail: str | None = None,
+        fraction: Decimal = D("1"),
     ) -> SellResult:
         pos = self.positions.get(mint)
         if not pos or pos.status != "open":
             return SellResult(False, "no_open_position")
+        frac = q(fraction)
+        if frac <= 0:
+            return SellResult(False, "bad_fraction")
+        if frac > 1:
+            frac = D("1")
         if curve.complete:
             pos.status = "stuck_migrated"
             pos.exit_reason = "stuck_migrated"
@@ -263,7 +269,8 @@ class ProposedBook:
             pos.exit_fixed += debit
             self._event("sell_failed_included", mint=mint, fee=str(debit))
             return SellResult(False, "sell_failed_included", fee_paid=debit)
-        proceeds = apply_sell(curve, pos.tokens, self.fees.protocol_rate)
+        sell_tokens = pos.tokens if frac >= 1 else pos.tokens * frac
+        proceeds = apply_sell(curve, sell_tokens, self.fees.protocol_rate)
         if adverse_slippage:
             proceeds *= self.fees.slippage_factor()
         exit_fixed = self.fees.fixed_success()
@@ -272,12 +279,14 @@ class ProposedBook:
             return SellResult(False, "sell_blocked_fees")
         self.cash -= exit_fixed
         self.cash += proceeds
-        pos.tokens = D("0")
-        pos.sol_out = proceeds
+        pos.sol_out += proceeds
         pos.exit_fixed += exit_fixed
-        pos.status = "closed"
-        pos.exit_reason = reason
-        self._event("sell", mint=mint, reason=reason, proceeds=str(proceeds))
+        pos.tokens -= sell_tokens
+        if pos.tokens <= D("0.000000001") or frac >= 1:
+            pos.tokens = D("0")
+            pos.status = "closed"
+            pos.exit_reason = reason
+        self._event("sell", mint=mint, reason=reason, proceeds=str(proceeds), fraction=str(frac))
         return SellResult(True, reason, proceeds=proceeds, fee_paid=exit_fixed)
 
     def on_synthetic_mark(
