@@ -39,6 +39,8 @@ import {
   buyIx,
   calcBuyTokens,
   calcSellSol,
+  expectedSellPrice,
+  exitImpactOfBuy,
   getBondingCurveState,
   sellIx,
 } from "../../lib/pumpfun.mjs";
@@ -63,6 +65,8 @@ const MIN_DEV_BUY = Number(process.env.SNIPER_MIN_DEV_BUY || 0);
 const COOLDOWN_SEC = Number(process.env.SNIPER_COOLDOWN_SEC || 10);
 const TOKEN_COOLDOWN_SEC = Number(process.env.SNIPER_TOKEN_COOLDOWN_SEC || 600);
 const MAX_CURVE_SOL = Number(process.env.SNIPER_MAX_CURVE_SOL || 12);
+const MIN_CURVE_SOL = Number(process.env.SNIPER_MIN_CURVE_SOL || 2);
+const MAX_EXIT_IMPACT_PCT = Number(process.env.MAX_EXIT_IMPACT_PCT || 5);
 const NO_REENTRY = !["0", "false", "no", "off"].includes(String(process.env.SNIPER_NO_REENTRY_AFTER_STOP ?? "1").toLowerCase());
 const STOP_TRIGGER = effectiveStopRatio(STOP_LOSS, earlyStopMargin());
 const POLL_MS = positionPollMs();
@@ -296,6 +300,22 @@ async function considerCreate(create, devTrade, opts = {}) {
     }
     return;
   }
+  if (realSol != null && realSol < MIN_CURVE_SOL) {
+    block.seen.add(create.mint);
+    log(`skip ${create.mint.slice(0, 8)}: curve ${realSol.toFixed(2)} SOL < ${MIN_CURVE_SOL}`);
+    persistBlock();
+    return;
+  }
+  const preview = curveFromTrade(trade);
+  if (preview) {
+    const impact = exitImpactOfBuy(preview, BUY_SOL);
+    if (impact && impact.spotGapPct * 100 > MAX_EXIT_IMPACT_PCT) {
+      block.seen.add(create.mint);
+      log(`skip ${create.mint.slice(0, 8)}: exit impact ${(impact.spotGapPct * 100).toFixed(2)}% > ${MAX_EXIT_IMPACT_PCT}%`);
+      persistBlock();
+      return;
+    }
+  }
   if (!opts.fromRetry) {
     if (slotsUsed() >= MAX_POSITIONS) return;
     if (Date.now() - lastBuyTime < COOLDOWN_SEC * 1000) return;
@@ -377,10 +397,15 @@ async function executeSell(mint, reason, markHint) {
   try {
     if (String(reason).startsWith("stop-loss") && pos.creator) noteRug(creatorPath, pos.creator, mint);
     if (DRY_RUN) {
-      let sellPrice = markHint;
+      const hint = markHint && typeof markHint === "object" ? markHint : { simulated: markHint, trigger: markHint, expected: null };
+      let sellPrice = hint.simulated;
       if (!(sellPrice > 0)) {
         const state = await getBondingCurveState(mintPk);
         if (state) sellPrice = spotSolPerToken(state.virtualSolReserves, state.virtualTokenReserves, pos.decimals || 6);
+      }
+      if (String(reason).startsWith("stop-loss") && pos.fillPrice > 0) {
+        const fmt = (value) => (value > 0 ? `${Number(value).toExponential(3)} (${(value / pos.fillPrice).toFixed(3)}x)` : "n/a");
+        log(`  stop quote: trigger ${fmt(hint.trigger)}, expected ${fmt(hint.expected)}, simulated ${fmt(sellPrice)}`);
       }
       if (sellPrice > 0 && pos.fillPrice > 0) {
         const pnlPct = ((sellPrice / pos.fillPrice) - 1) * 100;
@@ -453,15 +478,23 @@ function noteMark(mint, virtualSol, virtualToken) {
     pos.lastMark = mark;
     pos.lastMarkAt = Date.now();
   }
+  const expected = pos.tokens
+    ? expectedSellPrice({ virtualSolReserves: virtualSol, virtualTokenReserves: virtualToken }, pos.tokens, pos.decimals || 6)
+    : null;
   const decision = evaluateExit({
     mark,
+    expectedFill: expected,
     fillPrice: pos.fillPrice,
     entryTime: pos.entryTime,
     stopRatio: STOP_TRIGGER,
     takeProfitRatio: TAKE_PROFIT,
     timeoutSec: TIMEOUT_SEC,
   });
-  if (decision.action === "sell") executeSell(mint, decision.reason, mark);
+  if (decision.kind === "stop_loss") {
+    executeSell(mint, decision.reason, { trigger: mark, expected, simulated: expected });
+  } else if (decision.action === "sell") {
+    executeSell(mint, decision.reason, mark);
+  }
 }
 
 async function checkPositions() {

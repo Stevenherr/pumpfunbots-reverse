@@ -409,6 +409,8 @@ class SafetyCampaignTests(unittest.TestCase):
         self.assertLessEqual(quiet["late_by_s"], 2)
         self.assertGreaterEqual(quiet["late_by_s"], 0)
         self.assertTrue(quiet["stale_price"])
+        self.assertGreater(result["thin_exit_gap"], D("0.05"))
+        self.assertLess(result["deep_exit_gap"], D("0.05"))
         self.assertLess(result["slow_watch_pnl"], result["fast_watch_pnl"])
         self.assertEqual(result["auto_rejected"], ["AUTO_MINT"])
         self.assertEqual(len(result["approval_rejected"]), 1)

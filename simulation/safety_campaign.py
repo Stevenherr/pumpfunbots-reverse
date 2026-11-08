@@ -175,6 +175,17 @@ def sniper_launch(
     return "buy"
 
 
+def exit_spot_gap(vsol: Decimal, vtok: Decimal, sol_in: Decimal, rate: Decimal = D("0.01")) -> Decimal:
+    tokens = harness.quote_buy(vsol, vtok, sol_in, rate)
+    net = sol_in * (D(1) - rate)
+    vsol2 = vsol + net
+    vtok2 = vtok - tokens
+    out = harness.quote_sell(vsol2, vtok2, tokens, rate)
+    post_spot = vsol2 / vtok2
+    expected = out / tokens
+    return (post_spot - expected) / post_spot
+
+
 def quiet_timeout(timeout_s: int = 120, sweep_s: int = 1) -> dict:
     """No prices at all. The wall-clock sweep closes on the first tick at or after timeout."""
     close_after = timeout_s + sweep_s
@@ -415,6 +426,8 @@ def run_campaign() -> dict:
         ),
         "slow_watch_pnl": one_stop(D("0.71")),
         "quiet_timeout": quiet_timeout(),
+        "thin_exit_gap": exit_spot_gap(D("1"), D("1000"), D("0.2")),
+        "deep_exit_gap": exit_spot_gap(D("1000"), D("1000000"), D("0.05")),
     }
 
 
@@ -471,6 +484,11 @@ def format_report(result: dict) -> str:
             f"{result['quiet_timeout']['timeout_s']}s, geschlossen nach "
             f"{result['quiet_timeout']['closed_after_s']}s "
             f"(+{result['quiet_timeout']['late_by_s']}s, stale entry price)"
+        ),
+        (
+            "Abstand Spot zu Verkauf unserer Groesse: duenn "
+            f"{result['thin_exit_gap']}, tief {result['deep_exit_gap']}. "
+            "Ueber 5% wird nicht gekauft. Ein Crash in einem einzelnen Trade kann den Quote trotzdem unter 0.94 druecken."
         ),
         "Gebührenannahme: Priorität 0.00012, Tip 0.0001, Basis 0.000005, Protokoll 1%.",
         "Stop 0.94 vom Fill-Preis, Take-Profit 2.0, Kaufgröße 0.05 SOL. Alles synthetisch.",
