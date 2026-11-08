@@ -36,6 +36,7 @@ import {
 import { collectChainRugSignals } from "../../lib/rugcheck-chain.mjs";
 import { evaluateRug, loadThresholds } from "../../lib/rugcheck.mjs";
 import { connection, sendTxWithRetry } from "../../lib/rpc.mjs";
+import { positionPollMs } from "../../lib/rpc-budget.mjs";
 import { approvalTtlSec, autoBuyFlag, dryRunFlag, stopRatio } from "../../lib/runtime-flags.mjs";
 import { forEachTradeMark } from "../../lib/trade-event.mjs";
 import { buildVersionedTx, computeBudgetIxs, jitoTipIx } from "../../lib/tx.mjs";
@@ -47,7 +48,7 @@ const SELL_PCT = Number(process.env.COPY_SELL_PCT || 100);
 const MAX_POSITIONS = Number(process.env.COPY_MAX_POSITIONS || 5);
 const STOP_LOSS = stopRatio(process.env.COPY_STOP_LOSS, DEFAULT_STOP_RATIO);
 const TARGETS = (process.env.COPY_TARGETS || "").split(",").map((item) => item.trim()).filter(Boolean);
-const POLL_MS = 400;
+const POLL_MS = positionPollMs();
 const DRY_RUN = dryRunFlag();
 const AUTO_BUY = autoBuyFlag();
 const APPROVAL_TTL = approvalTtlSec();

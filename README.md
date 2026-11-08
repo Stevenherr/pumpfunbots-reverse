@@ -146,7 +146,7 @@ CREATE: BondingCurveV3, BondingCurveJupiter
 | `config.mjs` | `.env` loader, slippage (5%), CU budget, tip size |
 | `constants.mjs` | Program IDs, V3 event prefixes, instruction sets |
 | `pumpfun.mjs` | Bonding curve PDA, state deserialization, buy/sell ix |
-| `rpc.mjs` | Connection + sendTx with retry + confirmation |
+| `rpc.mjs` | Connection, shared RPC budget, sendTx |
 | `tx.mjs` | Versioned tx builder, ComputeBudget, Jito tip |
 | `wallet.mjs` | Keypair load/generate from `keys/` |
 | `ws.mjs` | WebSocket with auto-reconnect |
@@ -161,9 +161,10 @@ CREATE: BondingCurveV3, BondingCurveJupiter
 
 Sniper, Copy-Trader und Graduation-Sniper kaufen nicht mehr blind.
 
-- **Rug-Check** (`lib/rugcheck.mjs`) vor jedem Kauf. Abgelehnt wird bei gesetzter Mint- oder Freeze-Authority, zu hohem Anteil des größten Holders, zu hohem Dev-Buy des Creators, zu vielen Launches oder Signaturen des Creators und bei zu dünner realer Liquidität. Schwellen stehen in `.env.example`. Jede Ablehnung landet mit Grund im Log.
+- **Rug-Check** (`lib/rugcheck.mjs`) vor jedem Kauf. Abgelehnt wird bei gesetzter Mint- oder Freeze-Authority, zu hohem Anteil des größten Holders, zu hohem Dev-Buy des Creators, zu vielen selbst gesehenen Launches, einem früheren Stop-Rug desselben Creators und bei zu dünner realer Liquidität. Eine volle Signaturseite (oft genau 100) ist keine Historie. Schwellen stehen in `.env.example`. Jede Ablehnung landet mit Grund im Log. Ein HTTP 429 wird als `RUG DEFER` später erneut versucht und nie als Kauf und nie als Rug gezählt.
 - **Freigabe.** Standardmäßig signiert der Bot einen Kauf nicht selbst. Er schreibt Token, Betrag, Grund und Rug-Check-Ergebnis nach `data/approvals.json` und wartet. Freigeben: `node bots/approve.mjs approve <id>` oder der Button im lokalen Dashboard. Unbestätigte Vorschläge verfallen (`APPROVAL_TTL_SEC`). `AUTO_BUY=1` oder `--auto` ist der Opt-out und ist standardmäßig aus. `--dry-run` signiert nie, auch nicht zusammen mit `--auto`.
-- **Stop-Loss −6 %.** `SNIPER_STOP_LOSS`, `COPY_STOP_LOSS` und `GRAD_STOP_LOSS` stehen standardmäßig auf `0.94` und beziehen sich auf den Fill-Preis. Die Prüfung läuft über den Trade-Websocket, zusätzlich alle 400 ms. Offene Positionen liegen unter `data/positions/` und werden nach einem Neustart weiter überwacht. Ein Stop-Loss-Verkauf wartet nicht auf eine zweite Freigabe.
+- **Stop-Loss −6 %.** `SNIPER_STOP_LOSS`, `COPY_STOP_LOSS` und `GRAD_STOP_LOSS` stehen standardmäßig auf `0.94` und beziehen sich auf den Fill-Preis. Die Prüfung läuft über den Trade-Websocket; der Konto-Poll ist nur noch ein Backup (`POSITION_POLL_MS`, Standard 8 s), damit ein Free-Tier-RPC nicht in 429-Retries läuft. Alle Bots teilen sich `RPC_MAX_PER_SEC` über `data/rpc-budget.json`. Offene Positionen liegen unter `data/positions/` und werden nach einem Neustart weiter überwacht. Ein Stop-Loss-Verkauf wartet nicht auf eine zweite Freigabe. Der Trigger ist −6 %; der Fill kann durch Slippage danach noch schlechter sein.
+- **Graduation.** Der erste Print über der Fill-Schwelle kauft nicht. `GRAD_CONFIRM_SEC` (Standard 8 s) und `GRAD_CONFIRM_MAX_DIP` (Standard 2 %) lassen einen Dip aus. Nach einem Stop gibt es keinen Wiedereinstieg (`GRAD_NO_REENTRY_AFTER_STOP`), und jedes Token hat eine eigene Pause (`GRAD_TOKEN_COOLDOWN_SEC`).
 
 Die Offline-Simulation unter `simulation/` fährt dieselben Regeln mit Spielgeld. Siehe `simulation/README.md`.
 

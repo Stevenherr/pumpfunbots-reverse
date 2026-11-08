@@ -28,9 +28,11 @@ Beide Befehle brauchen nur die Python-Standardbibliothek. Abhängigkeiten des Re
 
 Startguthaben der Kampagne: **1,00 SOL**, synthetisch, kein Marktkurs. Kaufgröße 0,05 SOL. Take-Profit bei 2,0 vom Fill, nur als feste Testregel. Gebühren wie im bestehenden Harness.
 
-Der Rug-Check lehnt Mint-Authority, Freeze-Authority, Holder über 20 %, Dev-Buy über 10 %, mehr als 3 Launches, mehr als 40 Creator-Signaturen und reale Liquidität unter 0,4 SOL ab. Dieselben Schwellen sind die Defaults in `lib/rugcheck.mjs`.
+Der Rug-Check lehnt Mint-Authority, Freeze-Authority, Holder über 20 %, Dev-Buy über 10 %, mehr als 3 Launches, mindestens einen früheren Stop-Rug des Creators und reale Liquidität unter 0,4 SOL ab. Eine volle Signaturseite zählt nicht als Historie. Ein synthetisches Rate-Limit wird verschoben und nicht gekauft. Dieselben Defaults gelten im JavaScript.
 
-Die Freigabe kennt vier Ausgänge: Mensch gibt frei, Mensch lehnt ab, Vorschlag verfällt, `AUTO_BUY` kauft ohne Mensch. `AUTO_BUY` überspringt den Rug-Check nicht. Ein synthetischer Rug nach dem Einstieg wird beim ersten Print auf 0,94 geschlossen. Ein Vergleichsfall verkauft erst bei 0,40 des Fills, als wäre nur selten gepollt worden.
+Die Freigabe kennt vier Ausgänge: Mensch gibt frei, Mensch lehnt ab, Vorschlag verfällt, `AUTO_BUY` kauft ohne Mensch. `AUTO_BUY` überspringt den Rug-Check nicht. Ein synthetischer Rug nach dem Einstieg wird beim ersten Print auf 0,94 geschlossen. Ein Vergleichsfall verkauft erst bei 0,40 des Fills. Ein weiterer Fall zeigt, dass ein Fill bei 0,90 nach dem 0,94-Trigger mehr verliert: das ist Slippage, der Default bleibt 0,94.
+
+Die Graduation-Regel armt den ersten Print nur. Ein Dip über 2 % in 8 Sekunden kauft nicht. Ein Stop blockiert den Wiedereinstieg.
 
 ```bash
 python3 simulation/safety_campaign.py
