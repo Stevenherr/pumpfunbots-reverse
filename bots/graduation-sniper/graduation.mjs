@@ -12,13 +12,14 @@ import { runGuardedBuy } from "../../lib/buy-gate.mjs";
 import { attachBotStatus } from "../../lib/bot-status.mjs";
 import { ROOT, SLIPPAGE_BPS } from "../../lib/config.mjs";
 import { loadExitConfig, planExit } from "../../lib/exit-plan.mjs";
-import { sizeForImpact } from "../../lib/sizing.mjs";
+import { sizeBuy } from "../../lib/sizing.mjs";
 import { appendTrade, tradeLogFile } from "../../lib/trade-log.mjs";
 import {
   PUMP_PROGRAM,
   TOKEN_2022_PROGRAM,
   TRADE_EVENT_PREFIX,
   BUY_INSTRUCTIONS,
+  SELL_INSTRUCTIONS,
 } from "../../lib/constants.mjs";
 import {
   DEFAULT_STOP_RATIO,
@@ -57,6 +58,10 @@ import { SolanaWs } from "../../lib/ws.mjs";
 const BUY_SOL = Number(process.env.GRAD_BUY_SOL || 0.1);
 const MIN_BUY_SOL = Number(process.env.MIN_BUY_SOL || 0.02);
 const MAX_EXIT_IMPACT_PCT = Number(process.env.MAX_EXIT_IMPACT_PCT || 5);
+const MAX_BUY_OF_REAL_PCT = Number(process.env.MAX_BUY_OF_REAL_PCT || 5);
+const GRAD_ENABLED = !["0", "false", "no", "off"].includes(String(process.env.GRAD_ENABLED ?? "1").trim().toLowerCase());
+const GRAD_MIN_BUYS = Number(process.env.GRAD_MIN_BUYS ?? 3);
+const GRAD_MIN_BUY_SELL_RATIO = Number(process.env.GRAD_MIN_BUY_SELL_RATIO ?? 1.5);
 const exitConfig = loadExitConfig();
 const tradesPath = tradeLogFile(ROOT);
 const MIN_FILL_PCT = Number(process.env.GRAD_MIN_FILL_PCT || 92);
@@ -68,8 +73,8 @@ const MAX_POSITIONS = Number(process.env.GRAD_MAX_POSITIONS || 3);
 const COOLDOWN_SEC = Number(process.env.GRAD_COOLDOWN_SEC || 30);
 const TOKEN_COOLDOWN_SEC = Number(process.env.GRAD_TOKEN_COOLDOWN_SEC || 600);
 const NO_REENTRY = !["0", "false", "no", "off"].includes(String(process.env.GRAD_NO_REENTRY_AFTER_STOP ?? "1").toLowerCase());
-const CONFIRM_SEC = Number(process.env.GRAD_CONFIRM_SEC ?? 8);
-const CONFIRM_MAX_DIP = Number(process.env.GRAD_CONFIRM_MAX_DIP ?? 0.02);
+const CONFIRM_SEC = Number(process.env.GRAD_CONFIRM_SEC ?? 15);
+const CONFIRM_MAX_DIP = Number(process.env.GRAD_CONFIRM_MAX_DIP ?? 0.01);
 const POLL_MS = positionPollMs();
 const DRY_RUN = dryRunFlag();
 const AUTO_BUY = autoBuyFlag();
@@ -168,10 +173,15 @@ function sizedBuy(snapshot) {
   if (!snapshot?.virtualSolReserves || !snapshot?.virtualTokenReserves) {
     return { sol: BUY_SOL, skip: false, impactPct: null };
   }
-  return sizeForImpact(
-    (sol) => exitImpactOfBuy(snapshot, sol)?.spotGapPct,
-    { maxSol: BUY_SOL, minSol: Math.min(MIN_BUY_SOL, BUY_SOL), maxImpactPct: MAX_EXIT_IMPACT_PCT },
-  );
+  const realSol = snapshot?.realSolReserves == null ? null : Number(snapshot.realSolReserves) / 1e9;
+  return sizeBuy({
+    probe: (sol) => exitImpactOfBuy(snapshot, sol)?.spotGapPct,
+    maxSol: BUY_SOL,
+    minSol: Math.min(MIN_BUY_SOL, BUY_SOL),
+    maxImpactPct: MAX_EXIT_IMPACT_PCT,
+    realSol,
+    maxRealPct: MAX_BUY_OF_REAL_PCT,
+  });
 }
 
 async function paperBuy(mint, fillPct, decimals, snapshot, solIn = BUY_SOL) {
@@ -252,6 +262,7 @@ async function signBuy(mint, fillPct, solIn = BUY_SOL) {
 }
 
 async function buyToken(mint, fillPct, snapshot, opts = {}) {
+  if (!GRAD_ENABLED) return;
   const blocked = opts.fromRetry ? null : tokenBlocked(mint);
   if (blocked) {
     if (!noted.has(`${mint}:${blocked}`)) {
@@ -557,7 +568,8 @@ log("=== GRADUATION SNIPER ===");
 log(`Wallet: ${wallet.publicKey.toBase58()}`);
 log(`Config: buy=${BUY_SOL} SOL, fill>=${MIN_FILL_PCT}%, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x of fill, timeout=${TIMEOUT_SEC}s`);
 log(`Max positions: ${MAX_POSITIONS}, global cooldown: ${COOLDOWN_SEC}s, per-token cooldown: ${TOKEN_COOLDOWN_SEC}s`);
-log(`Confirm: ${CONFIRM_SEC}s, max dip ${(CONFIRM_MAX_DIP * 100).toFixed(1)}%, no re-entry after stop: ${NO_REENTRY}`);
+log(`Confirm: ${CONFIRM_SEC}s, max dip ${(CONFIRM_MAX_DIP * 100).toFixed(1)}%, buys>=${GRAD_MIN_BUYS}, buy/sell>=${GRAD_MIN_BUY_SELL_RATIO}, no re-entry after stop: ${NO_REENTRY}`);
+log(GRAD_ENABLED ? "Graduation: enabled" : "GRAD_ENABLED=0: paused, no websocket, no buys");
 log(`Price poll: ${POLL_MS}ms backup + trade stream. Stop stays ${STOP_LOSS} of fill; a later fill can lose more than 6% to slippage.`);
 log(DRY_RUN
   ? "MODE: DRY RUN (no signatures)"
@@ -565,8 +577,16 @@ log(DRY_RUN
     ? "MODE: AUTO_BUY (signs without manual approval)"
     : `MODE: approval required (${approvalFile}, ttl ${APPROVAL_TTL}s)`);
 if (positions.size) log(`Resumed ${positions.size} open position(s) from disk`);
-resumeQueuedBuys();
+if (GRAD_ENABLED) resumeQueuedBuys();
 
+if (!GRAD_ENABLED) {
+  attachBotStatus(ROOT, "graduation-sniper", () => ({
+    dryRun: DRY_RUN,
+    autoBuy: false,
+    wsReconnects: 0,
+    wsLastDataAt: null,
+  }));
+} else {
 ws = new SolanaWs();
 attachBotStatus(ROOT, "graduation-sniper", () => ({
   dryRun: DRY_RUN,
@@ -590,15 +610,16 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
     if (positions.has(mark.mint)) noteMark(mark.mint, mark.virtualSolReserves, mark.virtualTokenReserves);
   });
 
+  if (!GRAD_ENABLED) return;
   let isBuy = false;
+  let isSell = false;
   for (const line of value.logs) {
     const match = line.match(/Instruction: (\w+)/);
-    if (match && BUY_INSTRUCTIONS.has(match[1])) {
-      isBuy = true;
-      break;
-    }
+    if (!match) continue;
+    if (BUY_INSTRUCTIONS.has(match[1])) isBuy = true;
+    if (SELL_INSTRUCTIONS.has(match[1])) isSell = true;
   }
-  if (!isBuy) return;
+  if (!isBuy && !isSell) return;
 
   for (const line of value.logs) {
     if (!line.startsWith("Program data: ")) continue;
@@ -611,6 +632,11 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
       const spot = spotSolPerToken(event.virtualSolReserves, event.virtualTokenReserves);
       const now = Date.now();
       const prev = watchlist.get(event.mint);
+      if (!prev && !isBuy) continue;
+      if (prev) {
+        if (isBuy) prev.buys = (prev.buys || 0) + 1;
+        if (isSell) prev.sells = (prev.sells || 0) + 1;
+      }
       const decision = entryDecision({
         now,
         firstTs: prev?.firstTs ?? null,
@@ -622,10 +648,14 @@ ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {
         maxDip: CONFIRM_MAX_DIP,
         blocked: NO_REENTRY && block.stopped.has(event.mint),
         cooldownUntil: block.cooldown.get(event.mint) || 0,
+        buys: prev ? prev.buys : 1,
+        sells: prev ? prev.sells : 0,
+        minBuys: GRAD_MIN_BUYS,
+        minBuySellRatio: GRAD_MIN_BUY_SELL_RATIO,
       });
       if (decision.action === "arm") {
-        watchlist.set(event.mint, { firstTs: now, firstSpot: spot, fillPct, ts: now, decided: false });
-        log(`WATCHLIST: ${event.mint.slice(0, 12)} fill=${fillPct.toFixed(1)}% confirm ${CONFIRM_SEC}s`);
+        watchlist.set(event.mint, { firstTs: now, firstSpot: spot, fillPct, ts: now, decided: false, buys: 1, sells: 0 });
+        log(`WATCHLIST: ${event.mint.slice(0, 12)} fill=${fillPct.toFixed(1)}% confirm ${CONFIRM_SEC}s dip<=${(CONFIRM_MAX_DIP * 100).toFixed(1)}% buys>=${GRAD_MIN_BUYS}`);
       } else if (decision.action === "wait" && prev) {
         prev.ts = now;
         prev.fillPct = fillPct;
@@ -689,6 +719,7 @@ setInterval(() => {
     if (now - info.ts > 600_000) watchlist.delete(mint);
   }
 }, 60_000);
+}
 
 process.on("SIGINT", () => {
   log("\nStopping.");
@@ -697,6 +728,6 @@ process.on("SIGINT", () => {
   log(`  Open positions: ${positions.size}`);
   persist();
   persistBlock();
-  ws.close();
+  ws?.close();
   process.exit(0);
 });

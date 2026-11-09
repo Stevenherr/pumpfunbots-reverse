@@ -13,9 +13,9 @@ import { defaultApprovalFile, listForBot } from "../../lib/approval.mjs";
 import { runGuardedBuy } from "../../lib/buy-gate.mjs";
 import { attachBotStatus } from "../../lib/bot-status.mjs";
 import { historyFile, noteLaunch, noteRug } from "../../lib/creator-history.mjs";
-import { confirmEntry, loadEntryConfig } from "../../lib/entry-confirm.mjs";
+import { compactSkipKey, confirmEntry, loadEntryConfig, thresholdsForLiquidity } from "../../lib/entry-confirm.mjs";
 import { loadExitConfig, planExit } from "../../lib/exit-plan.mjs";
-import { sizeForImpact } from "../../lib/sizing.mjs";
+import { sizeBuy } from "../../lib/sizing.mjs";
 import { appendTrade, tradeLogFile } from "../../lib/trade-log.mjs";
 import { loadMintBlock, saveMintBlock } from "../../lib/graduation-entry.mjs";
 import { claimHold, heldByOther, heldMintsFile, releaseHold } from "../../lib/held-mints.mjs";
@@ -72,6 +72,7 @@ const MAX_CURVE_SOL = Number(process.env.SNIPER_MAX_CURVE_SOL || 12);
 const MIN_CURVE_SOL = Number(process.env.SNIPER_MIN_CURVE_SOL || 2);
 const MAX_EXIT_IMPACT_PCT = Number(process.env.MAX_EXIT_IMPACT_PCT || 5);
 const MIN_BUY_SOL = Number(process.env.MIN_BUY_SOL || 0.02);
+const MAX_BUY_OF_REAL_PCT = Number(process.env.MAX_BUY_OF_REAL_PCT || 5);
 const exitConfig = loadExitConfig();
 const entryConfig = loadEntryConfig();
 const tradesPath = tradeLogFile(ROOT);
@@ -354,30 +355,34 @@ async function considerCreate(create, devTrade, opts = {}) {
   const preview = curveFromTrade(trade);
   let buySol = BUY_SOL;
   let entryImpact = null;
-  if (preview) {
-    const sized = sizeForImpact(
-      (sol) => exitImpactOfBuy(preview, sol)?.spotGapPct,
-      { maxSol: BUY_SOL, minSol: Math.min(MIN_BUY_SOL, BUY_SOL), maxImpactPct: MAX_EXIT_IMPACT_PCT },
-    );
-    entryImpact = sized.impactPct;
-    if (sized.skip) {
-      block.seen.add(create.mint);
-      const reason = `exit impact ${(sized.impactPct ?? 0).toFixed(2)}% at ${sized.sol.toFixed(4)} SOL > ${MAX_EXIT_IMPACT_PCT}%`;
-      log(`skip ${create.mint.slice(0, 8)}: ${reason}`);
-      journal({
-        event: "skip",
-        bot: "sniper",
-        mint: create.mint,
-        skipReason: "min_buy_still_exceeds_impact",
-        entryLiquiditySol: realSol,
-        sizeSol: sized.sol,
-        expectedFill: sized.impactPct,
-      });
-      persistBlock();
-      return;
-    }
-    buySol = sized.sol;
+  const sized = sizeBuy({
+    probe: preview ? (sol) => exitImpactOfBuy(preview, sol)?.spotGapPct : null,
+    maxSol: BUY_SOL,
+    minSol: Math.min(MIN_BUY_SOL, BUY_SOL),
+    maxImpactPct: MAX_EXIT_IMPACT_PCT,
+    realSol,
+    maxRealPct: MAX_BUY_OF_REAL_PCT,
+  });
+  entryImpact = sized.impactPct;
+  if (sized.skip) {
+    block.seen.add(create.mint);
+    const reason = sized.reason === "min_buy_exceeds_liquidity"
+      ? `real ${realSol?.toFixed?.(2) ?? "?"} SOL caps the buy under ${MIN_BUY_SOL}`
+      : `exit impact ${(sized.impactPct ?? 0).toFixed(2)}% at ${sized.sol.toFixed(4)} SOL > ${MAX_EXIT_IMPACT_PCT}%`;
+    log(`skip ${create.mint.slice(0, 8)}: ${reason}`);
+    journal({
+      event: "skip",
+      bot: "sniper",
+      mint: create.mint,
+      skipReason: sized.reason,
+      entryLiquiditySol: realSol,
+      sizeSol: sized.sol,
+      expectedFill: sized.impactPct,
+    });
+    persistBlock();
+    return;
   }
+  buySol = sized.sol;
   if (!opts.fromRetry) {
     if (slotsUsed() >= MAX_POSITIONS) return;
     if (Date.now() - lastBuyTime < COOLDOWN_SEC * 1000) return;
@@ -400,7 +405,7 @@ async function considerCreate(create, devTrade, opts = {}) {
   const stats = noteLaunch(creatorPath, create.creator, create.mint);
   const curve = curveFromTrade(trade);
   try {
-    log(`\nSNIPING: ${create.mint}`);
+    log(`\nSNIPING: ${create.mint} size ${buySol.toFixed(4)} SOL (${sized.reason})`);
     log(`  creator: ${create.creator} launches=${stats.launches} rugs=${stats.rugs}`);
     const signals = await collectChainRugSignals({
       mint: create.mint,
@@ -738,6 +743,7 @@ log("=== SNIPER BOT (V3) ===");
 log(`Wallet: ${wallet.publicKey.toBase58()}`);
 log(`Config: buy<=${BUY_SOL} SOL, floor ${MIN_BUY_SOL}, partial ${exitConfig.partialTpPct}% @ ${exitConfig.partialTpX}x, trail ${exitConfig.trailPct} after ${exitConfig.trailActivateX}x, TP=${TAKE_PROFIT}x, SL=${STOP_LOSS}x of fill, trigger ${STOP_TRIGGER.toFixed(3)}x, timeout=${TIMEOUT_SEC}s, max hold ${exitConfig.maxHoldSec}s`);
 log(`Entry confirm: ${entryConfig.windowMs}ms, buyers>=${entryConfig.minBuyers}, buy/sell>=${entryConfig.minBuySellRatio}, pump<=${entryConfig.maxPumpX}x`);
+log(`Size: <=${MAX_BUY_OF_REAL_PCT}% of real SOL, floor ${MIN_BUY_SOL}. Band ${entryConfig.bandMinSol}-${entryConfig.bandMaxSol} SOL needs buyers>=${entryConfig.bandMinBuyers}, buy/sell>=${entryConfig.bandMinBuySellRatio}`);
 log(`Max positions: ${MAX_POSITIONS}, cooldown: ${COOLDOWN_SEC}s, per-token ${TOKEN_COOLDOWN_SEC}s, fresh curve <= ${MAX_CURVE_SOL} SOL`);
 log(`Price: per-mint websocket + one held mint every ${POLL_MS}ms. No re-entry after stop: ${NO_REENTRY}`);
 log(DRY_RUN
@@ -802,10 +808,33 @@ function slotPeak(row) {
   return peak || null;
 }
 
+const skipCounts = new Map();
+let lastSkipFlush = Date.now();
+
+function noteSkip(reason) {
+  const key = compactSkipKey(reason);
+  skipCounts.set(key, (skipCounts.get(key) || 0) + 1);
+}
+
+function flushSkips(force = false) {
+  const now = Date.now();
+  if (!force && now - lastSkipFlush < 30_000) return;
+  if (!skipCounts.size) {
+    lastSkipFlush = now;
+    return;
+  }
+  const parts = [...skipCounts.entries()].sort((a, b) => b[1] - a[1]).map(([key, count]) => `${key} x${count}`);
+  log(`skips ${parts.join(", ")}`);
+  skipCounts.clear();
+  lastSkipFlush = now;
+}
+
 async function sweepConfirms() {
   if (!(entryConfig.windowMs > 0)) return;
   const now = Date.now();
   for (const [mint, row] of [...pending]) {
+    const realSol = realSolOf(row.devTrade || row.create);
+    const bar = thresholdsForLiquidity(realSol, entryConfig);
     const decision = confirmEntry({
       elapsedMs: now - row.started,
       windowMs: entryConfig.windowMs,
@@ -814,8 +843,8 @@ async function sweepConfirms() {
       sells: row.sells,
       price: row.price,
       launchPrice: row.launchPrice,
-      minBuyers: entryConfig.minBuyers,
-      minBuySellRatio: entryConfig.minBuySellRatio,
+      minBuyers: bar.minBuyers,
+      minBuySellRatio: bar.minBuySellRatio,
       maxPumpX: entryConfig.maxPumpX,
     });
     if (decision.action === "wait") continue;
@@ -823,18 +852,22 @@ async function sweepConfirms() {
     if (decision.action === "skip") {
       block.seen.add(mint);
       persistBlock();
-      log(`skip ${mint.slice(0, 8)}: ${decision.reason}`);
+      const reason = bar.band
+        ? `${decision.reason} (liq ${entryConfig.bandMinSol}-${entryConfig.bandMaxSol})`
+        : decision.reason;
+      noteSkip(reason);
       journal({
         event: "skip",
         bot: "sniper",
         mint,
-        skipReason: decision.reason,
-        entryLiquiditySol: realSolOf(row.devTrade || row.create),
+        skipReason: reason,
+        entryLiquiditySol: realSol,
       });
       continue;
     }
     await considerCreate(row.create, row.devTrade, { sameSlotBuyers: slotPeak(row) });
   }
+  flushSkips();
 }
 
 ws.subscribeLogs(PUMP_PROGRAM.toBase58(), async (result) => {
@@ -888,6 +921,7 @@ process.on("SIGINT", () => {
     log(`  ${mint.slice(0, 12)}: fill ${Number(pos.fillPrice).toExponential(6)}`);
   }
   persist();
+  flushSkips(true);
   ws.close();
   process.exit(0);
 });
