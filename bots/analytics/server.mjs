@@ -8,6 +8,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { attachBotStatus } from "../../lib/bot-status.mjs";
 import { PUMP_PROGRAM } from "../../lib/constants.mjs";
 import { ROOT } from "../../lib/config.mjs";
 import { eventsFromLogs } from "../../lib/market-events.mjs";
@@ -101,6 +102,12 @@ function processEvents(parsed) {
 
 // WebSocket listener
 const ws = new SolanaWs();
+attachBotStatus(ROOT, "analytics", () => ({
+  dryRun: true,
+  autoBuy: false,
+  wsReconnects: ws?.reconnects ?? 0,
+  wsLastDataAt: ws?.lastDataAt ?? null,
+}));
 await ws.connect();
 
 ws.subscribeLogs(PUMP_PROGRAM.toBase58(), (result) => {

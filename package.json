@@ -11,6 +11,7 @@
     "analytics": "node bots/analytics/server.mjs",
     "graduation": "node bots/graduation-sniper/graduation.mjs",
     "approve": "node bots/approve.mjs",
+    "tui": "node bots/tui/dashboard.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

@@ -9,6 +9,7 @@ import { PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { defaultApprovalFile, listForBot } from "../../lib/approval.mjs";
 import { runGuardedBuy } from "../../lib/buy-gate.mjs";
+import { attachBotStatus } from "../../lib/bot-status.mjs";
 import { ROOT, SLIPPAGE_BPS } from "../../lib/config.mjs";
 import { loadExitConfig, planExit } from "../../lib/exit-plan.mjs";
 import { sizeForImpact } from "../../lib/sizing.mjs";
@@ -567,6 +568,12 @@ if (positions.size) log(`Resumed ${positions.size} open position(s) from disk`);
 resumeQueuedBuys();
 
 ws = new SolanaWs();
+attachBotStatus(ROOT, "graduation-sniper", () => ({
+  dryRun: DRY_RUN,
+  autoBuy: AUTO_BUY,
+  wsReconnects: ws?.reconnects ?? 0,
+  wsLastDataAt: ws?.lastDataAt ?? null,
+}));
 await ws.connect();
 for (const mint of positions.keys()) {
   claimHold(holdPath, "graduation-sniper", mint);
