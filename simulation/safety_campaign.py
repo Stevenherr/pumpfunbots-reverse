@@ -36,6 +36,7 @@ START_SOL = D("1.00")
 BUY_SOL = D("0.05")
 MIN_BUY_SOL = D("0.02")
 MAX_EXIT_IMPACT = D("0.05")
+MAX_BUY_OF_REAL_PCT = D("5")
 
 
 def fmt_pct(value: Decimal) -> str:
@@ -239,11 +240,15 @@ def entry_decision(
     first_spot: Decimal | None,
     spot: Decimal,
     fill_pct: Decimal,
-    confirm_sec: int = 8,
-    max_dip: Decimal = D("0.02"),
+    confirm_sec: int = 15,
+    max_dip: Decimal = D("0.01"),
     blocked: bool = False,
     cooldown_until: int = 0,
     min_fill: Decimal = D("92"),
+    buys: int = 0,
+    sells: int = 0,
+    min_buys: int = 0,
+    min_buy_sell_ratio: Decimal = D("0"),
 ) -> str:
     if blocked:
         return "reentry_after_stop"
@@ -257,7 +262,29 @@ def entry_decision(
         return "wait"
     if max_dip > 0 and first_spot > 0 and (first_spot - spot) / first_spot > max_dip:
         return "confirm_dip"
+    if min_buys > 0 and buys < min_buys:
+        return "buy_pressure"
+    if min_buy_sell_ratio > 0:
+        ratio = (D(buys) / D(sells)) if sells else (D("999") if buys else D("0"))
+        if ratio < min_buy_sell_ratio:
+            return "buy_pressure"
     return "buy"
+
+
+def size_for_liquidity(real_sol, max_sol, min_sol, max_real_pct):
+    """Cap by real SOL. A deep virtual pool does not do this by itself."""
+    cap = max_sol
+    if max_real_pct > 0 and real_sol is not None and real_sol > 0:
+        cap = min(cap, real_sol * max_real_pct / D(100))
+    if cap < min_sol:
+        return cap, True
+    return cap, False
+
+
+def band_bar(real_sol, *, base_buyers=3, band_min=D("2"), band_max=D("4"), band_buyers=5):
+    if band_max > band_min and real_sol is not None and band_min <= real_sol < band_max:
+        return band_buyers, True
+    return base_buyers, False
 
 
 def clean_token(**overrides: object) -> dict:
@@ -499,15 +526,41 @@ def run_campaign() -> dict:
             raise RuntimeError("slippage side book did not close")
         return pnl
 
+    real_scaled, real_skipped = size_for_liquidity(D("0.8"), BUY_SOL, MIN_BUY_SOL, MAX_BUY_OF_REAL_PCT)
+    deep_virtual_gap = exit_spot_gap(D("30"), D("1000000"), D("0.1"))
+    if not real_skipped:
+        human_buys += 1
+        real_item = queue.propose("REAL_LIQ", str(real_scaled), "capped by real SOL")
+        queue.decide(real_item["id"], "approved")
+        real_curve = harness.fresh_curve()
+        real_buy = book.try_buy("REAL_LIQ", real_curve, real_scaled)
+        if real_buy.accepted:
+            sold, fill = drive_exit(book, real_curve, "REAL_LIQ", [D("0.98")])
+            position = book.positions["REAL_LIQ"]
+            trades.append({
+                "mint": "REAL_LIQ",
+                "status": position.status,
+                "exit": position.exit_reason,
+                "pnl": position.cash_pnl(),
+                "fill": fill,
+                "sold": bool(sold and sold.sold),
+                "size": real_scaled,
+            })
+
     graduation = {
         "dip": entry_decision(
-            now=8, first_ts=0, first_spot=D("1"), spot=D("0.97"), fill_pct=D("95"),
+            now=15, first_ts=0, first_spot=D("1"), spot=D("0.97"), fill_pct=D("95"),
         ),
         "stable": entry_decision(
-            now=8, first_ts=0, first_spot=D("1"), spot=D("0.99"), fill_pct=D("95"),
+            now=15, first_ts=0, first_spot=D("1"), spot=D("0.995"), fill_pct=D("95"),
+            buys=4, sells=1, min_buys=3, min_buy_sell_ratio=D("1.5"),
         ),
         "reentry": entry_decision(
             now=20, first_ts=0, first_spot=D("1"), spot=D("1"), fill_pct=D("95"), blocked=True,
+        ),
+        "pressure": entry_decision(
+            now=15, first_ts=0, first_spot=D("1"), spot=D("1"), fill_pct=D("95"),
+            buys=1, sells=2, min_buys=3, min_buy_sell_ratio=D("1.5"),
         ),
     }
 
@@ -569,6 +622,13 @@ def run_campaign() -> dict:
         "entry_skip": entry_skip,
         "entry_pump": entry_pump,
         "entry_ok": entry_ok,
+        "real_scaled_sol": real_scaled,
+        "real_scaled_skipped": real_skipped,
+        "deep_virtual_gap": deep_virtual_gap,
+        "band_mid_buyers": band_bar(D("3"))[0],
+        "band_mid": band_bar(D("3"))[1],
+        "band_outside_buyers": band_bar(D("6"))[0],
+        "band_outside": band_bar(D("6"))[1],
     }
 
 
@@ -641,6 +701,20 @@ def format_report(result: dict) -> str:
         (
             f"Einstiegsfenster: knapp {result['entry_skip']}; schon gelaufen {result['entry_pump']}; "
             f"bestätigt {result['entry_ok']}."
+        ),
+        (
+            "Reale Liquidität deckelt die Größe, auch wenn der Spot-Abstand auf 30 virtuellen SOL "
+            f"nur {result['deep_virtual_gap']} ist. 0.8 reale SOL bei 5% ergeben {money(result['real_scaled_sol'])} SOL "
+            f"(übersprungen={result['real_scaled_skipped']})."
+        ),
+        (
+            f"Band 2-4 SOL verlangt {result['band_mid_buyers']} Käufer (aktiv={result['band_mid']}); "
+            f"außerhalb bleiben {result['band_outside_buyers']} (aktiv={result['band_outside']})."
+        ),
+        (
+            "Graduation: Dip "
+            f"{result['graduation']['dip']}, stabil {result['graduation']['stable']}, "
+            f"Druck {result['graduation']['pressure']}, Wiedereinstieg {result['graduation']['reentry']}."
         ),
     ])
     return "\n".join(lines)
